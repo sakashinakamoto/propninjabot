@@ -43,29 +43,40 @@ def nav(cb):
         [InlineKeyboardButton("Main Menu", callback_data="menu")],
     ])
 
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command and display main menu"""
+    await update.message.reply_text("PropNinja - Choose:", reply_markup=menu())
+
 async def picks_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(fmt(PICKS[:5], "ALL PLATFORMS")[:4096])
+    """Handle /picks command"""
+    await update.message.reply_text(fmt(PICKS[:5], "ALL PLATFORMS")[:4096], reply_markup=nav("all"))
 
 async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    d = q.data
-    if d == "menu":
-        await q.edit_message_text("PropNinja - Choose:", reply_markup=menu())
-        return
-    if d == "all":
-        await q.edit_message_text(fmt(PICKS[:5], "ALL")[:4096], reply_markup=nav("all"))
-        return
-    if d.startswith("src_"):
-        src = d.split("_", 1)[1]
-        picks = [p for p in PICKS if p["source"] == src]
-        await q.edit_message_text(fmt(picks, src)[:4096] if picks else "No picks now.", reply_markup=nav(d))
-        return
-    if d.startswith("sport_"):
-        sport = d.split("_", 1)[1]
-        picks = [p for p in PICKS if p["sport"] == sport]
-        await q.edit_message_text(fmt(picks, sport)[:4096] if picks else "No picks now.", reply_markup=nav(d))
-        return
+    """Handle all button callbacks"""
+    try:
+        q = update.callback_query
+        await q.answer()
+        d = q.data
+        if d == "menu":
+            await q.edit_message_text("PropNinja - Choose:", reply_markup=menu())
+            return
+        if d == "all":
+            await q.edit_message_text(fmt(PICKS[:5], "ALL")[:4096], reply_markup=nav("all"))
+            return
+        if d.startswith("src_"):
+            src = d.split("_", 1)[1]
+            picks = [p for p in PICKS if p["source"] == src]
+            await q.edit_message_text(fmt(picks, src)[:4096] if picks else "No picks now.", reply_markup=nav(d))
+            return
+        if d.startswith("sport_"):
+            sport = d.split("_", 1)[1]
+            picks = [p for p in PICKS if p["sport"] == sport]
+            await q.edit_message_text(fmt(picks, sport)[:4096] if picks else "No picks now.", reply_markup=nav(d))
+            return
+    except Exception as e:
+        logger.error(f"Error handling button callback: {e}")
+
+# Start function added for bot to respond to /start command
 
 def main():
     if not TELEGRAM_TOKEN:
