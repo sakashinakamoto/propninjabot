@@ -37,6 +37,7 @@ def nav(cb):
         [InlineKeyboardButton("Refresh", callback_data=cb)],
         [InlineKeyboardButton("Main Menu", callback_data="menu")],
     ])
+    
     async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "PropNinja Bot is LIVE\nTap below to get picks:",
