@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "propninjabot"
+version = "0.1.0"
+description = "A bot for property management"
+author = "Your Name <your.email@example.com>"
+
+[tool.poetry.dependencies]
+python = "^3.8"
+python-telegram-bot = "^20.0"
+requests = "^2.26"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.backends.pep517"
