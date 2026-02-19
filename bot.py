@@ -4,26 +4,23 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = os.environ.get("BOT_TOKEN")
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
-
 app = Flask(__name__)
-application = ApplicationBuilder().token(TOKEN).build()
 
-# ---- Commands ----
+# Telegram bot setup
+bot_app = ApplicationBuilder().token(TOKEN).build()
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot is live 🚀")
+    await update.message.reply_text("Bot is active 🚀")
 
-application.add_handler(CommandHandler("start", start))
+bot_app.add_handler(CommandHandler("start", start))
 
-# ---- Webhook Route ----
 @app.route(f"/{TOKEN}", methods=["POST"])
-async def webhook():
+async def webhook_handler():
     data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return "ok"
+    update = Update.de_json(data, bot_app.bot)
+    await bot_app.process_update(update)
+    return "OK"
 
-# ---- Main ----
 if __name__ == "__main__":
-    application.bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/{TOKEN}")
+    bot_app.bot.set_webhook(url=f"{os.environ.get('RENDER_EXTERNAL_URL')}/{TOKEN}")
     app.run(host="0.0.0.0", port=10000)
