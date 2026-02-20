@@ -6,7 +6,7 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-logging.basicConfig(format=”%(asctime)s - %(levelname)s - %(message)s”, level=logging.INFO)
+logging.basicConfigformat=”%(asctime)s - %(levelname)s - %(message)s”, level=logging.INFO)
 logger = logging.getLogger(**name**)
 
 TELEGRAM_TOKEN = os.environ.get(“TELEGRAM_TOKEN”, “”)
