@@ -7,7 +7,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
-logging.basicConfig(format=LOG_FORMAT, level=logging.INFO)
+logging.basicConfi(format=LOG_FORMAT, level=logging.INFO)
 logger = logging.getLogger(**name**)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
