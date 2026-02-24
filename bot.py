@@ -10,7 +10,7 @@ LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 logging.basicConfig(format=LOG_FORMAT, level=logging.INFO)
 logger = logging.getLogger(**name**)
 
-TELEGRAM_TOKEN = os.environ.get(“TELEGRAM_TOKEN”, “”)
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 DECIMAL_ODDS = 1.90
 MIN_EDGE = 0.05
 
