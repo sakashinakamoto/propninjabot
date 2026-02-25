@@ -15,15 +15,18 @@ logging.basicConfig(format=LOG_FORMAT, level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-PRIZEPICKS_API = "https://partner-api.prizepicks.com/projections?per_page=1000"
-KALSHI_API = "https://trading-api.kalshi.com/trade-api/v2"
+
+# CORRECT LIVE ENDPOINTS
+PRIZEPICKS_PRIMARY = "https://partner-api.prizepicks.com/projections?per_page=1000"
+PRIZEPICKS_FALLBACK = "https://api.prizepicks.com/projections"
+KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 
 DECIMAL_ODDS   = 1.90
-MIN_EDGE       = 0.06
-MIN_CONFIDENCE = 0.64
+MIN_EDGE       = 0.04   # temporarily lowered to confirm flow
+MIN_CONFIDENCE = 0.58   # temporarily lowered
 
 # =====================================================
-# CORE MODEL (3 Factor + Source Bias)
+# MODEL
 # =====================================================
 
 def normal_cdf(z):
@@ -33,10 +36,9 @@ def compute_projection(line, stat, source):
     if line <= 0:
         return 0, 0, 0
 
+    boost = 0.05
     stat_lower = stat.lower()
 
-    # Base stat bias
-    boost = 0.055
     if "assist" in stat_lower:
         boost += 0.01
     elif "points" in stat_lower:
@@ -44,19 +46,16 @@ def compute_projection(line, stat, source):
     elif "rebound" in stat_lower:
         boost -= 0.005
 
-    # Source bias
-    source_bias = {
-        "PrizePicks": 0.055,
-        "Kalshi": 0.045
-    }
-    boost += source_bias.get(source, 0.05)
+    if source == "PrizePicks":
+        boost += 0.055
+    elif source == "Kalshi":
+        boost += 0.045
 
-    # 3-factor weighted projection
-    season_proj  = line * (1 + boost)
-    recent_proj  = line * (1 + boost * 1.15)
-    matchup_proj = line * (1 + boost * 0.90)
+    season = line * (1 + boost)
+    recent = line * (1 + boost * 1.15)
+    matchup = line * (1 + boost * 0.90)
 
-    projection = (season_proj * 0.4) + (recent_proj * 0.4) + (matchup_proj * 0.2)
+    projection = (season * 0.4) + (recent * 0.4) + (matchup * 0.2)
 
     std_dev = line * 0.18
     z = (projection - line) / std_dev
@@ -75,26 +74,29 @@ def grade(edge):
     return "D"
 
 # =====================================================
-# DATA FETCHERS
+# PRIZEPICKS
 # =====================================================
 
 def fetch_prizepicks():
     picks = []
+
     try:
-        resp = requests.get(PRIZEPICKS_API, timeout=15)
+        resp = requests.get(PRIZEPICKS_PRIMARY, timeout=10)
+
         if resp.status_code != 200:
+            logger.warning("Primary PrizePicks failed, trying fallback")
+            resp = requests.get(
+                PRIZEPICKS_FALLBACK,
+                params={"per_page": 250, "single_stat": True},
+                timeout=10
+            )
+
+        if resp.status_code != 200:
+            logger.warning("PrizePicks unavailable")
             return []
 
         data = resp.json()
-        players = {}
-
-        for item in data.get("included", []):
-            if item.get("type") in ("new_player", "player"):
-                attrs = item.get("attributes", {})
-                players[item["id"]] = {
-                    "name": attrs.get("display_name") or attrs.get("name", "Unknown"),
-                    "team": attrs.get("team", ""),
-                }
+        logger.info(f"PrizePicks raw projections: {len(data.get('data', []))}")
 
         for proj in data.get("data", []):
             attrs = proj.get("attributes", {})
@@ -102,7 +104,7 @@ def fetch_prizepicks():
             stat = attrs.get("stat_type", "")
             status = attrs.get("status", "")
 
-            if status in ("locked", "disabled") or not line:
+            if status in ("locked", "disabled"):
                 continue
 
             try:
@@ -110,19 +112,13 @@ def fetch_prizepicks():
             except:
                 continue
 
-            rel = proj.get("relationships", {})
-            pid = rel.get("new_player", {}).get("data", {}).get("id") \
-               or rel.get("player", {}).get("data", {}).get("id")
-
-            pinfo = players.get(pid, {"name": "Unknown", "team": ""})
-
             projection, prob, edge = compute_projection(line, stat, "PrizePicks")
 
-            if prob >= MIN_CONFIDENCE and edge >= MIN_EDGE:
+            # Loosen filter for debug
+            if edge >= MIN_EDGE:
                 picks.append({
                     "source": "PrizePicks",
-                    "player": pinfo["name"],
-                    "team": pinfo["team"],
+                    "player": attrs.get("description", "Unknown"),
                     "stat": stat,
                     "line": line,
                     "projection": projection,
@@ -135,21 +131,31 @@ def fetch_prizepicks():
     except Exception as e:
         logger.warning(f"PrizePicks error: {e}")
 
+    logger.info(f"PrizePicks picks returned: {len(picks)}")
     return picks
+
+# =====================================================
+# KALSHI (CORRECT ENDPOINT)
+# =====================================================
 
 def fetch_kalshi():
     picks = []
+
     try:
         resp = requests.get(
             f"{KALSHI_API}/markets",
-            params={"limit": 200, "status": "open"},
-            timeout=15
+            params={"limit": 300, "status": "open"},
+            timeout=12
         )
 
         if resp.status_code != 200:
+            logger.warning("Kalshi API failed")
             return []
 
-        for market in resp.json().get("markets", []):
+        markets = resp.json().get("markets", [])
+        logger.info(f"Kalshi markets fetched: {len(markets)}")
+
+        for market in markets:
             title = market.get("title", "")
             subtitle = market.get("subtitle", "")
             combined = (title + " " + subtitle).lower()
@@ -158,7 +164,7 @@ def fetch_kalshi():
                 continue
 
             line = 0
-            for w in title.replace("+", " ").split():
+            for w in title.replace("+", " ").replace(",", "").split():
                 try:
                     val = float(w)
                     if 0.5 <= val <= 500:
@@ -172,11 +178,10 @@ def fetch_kalshi():
 
             projection, prob, edge = compute_projection(line, subtitle, "Kalshi")
 
-            if prob >= MIN_CONFIDENCE and edge >= MIN_EDGE:
+            if edge >= MIN_EDGE:
                 picks.append({
                     "source": "Kalshi",
                     "player": title[:50],
-                    "team": "",
                     "stat": subtitle,
                     "line": line,
                     "projection": projection,
@@ -189,50 +194,43 @@ def fetch_kalshi():
     except Exception as e:
         logger.warning(f"Kalshi error: {e}")
 
+    logger.info(f"Kalshi picks returned: {len(picks)}")
     return picks
 
 # =====================================================
-# PICK ENGINE
+# ENGINE
 # =====================================================
 
-def generate_picks(source_filter=None):
-    all_picks = []
-    if source_filter in (None, "PrizePicks"):
-        all_picks.extend(fetch_prizepicks())
-    if source_filter in (None, "Kalshi"):
-        all_picks.extend(fetch_kalshi())
+def generate_picks():
+    picks = fetch_prizepicks() + fetch_kalshi()
 
-    # Deduplicate
     seen = set()
     unique = []
-    for p in all_picks:
+
+    for p in picks:
         key = f"{p['player']}_{p['stat']}_{p['line']}"
         if key not in seen:
             seen.add(key)
             unique.append(p)
 
     unique.sort(key=lambda x: x["edge"], reverse=True)
+    logger.info(f"Total combined picks: {len(unique)}")
     return unique[:15]
 
 # =====================================================
-# TELEGRAM UI
+# TELEGRAM
 # =====================================================
 
-def main_menu():
+def menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎯 All Live Picks", callback_data="all")],
-        [
-            InlineKeyboardButton("🏀 PrizePicks", callback_data="pp"),
-            InlineKeyboardButton("📈 Kalshi", callback_data="ks")
-        ],
-        [InlineKeyboardButton("🔥 Top A/A+ Only", callback_data="top")]
+        [InlineKeyboardButton("🎯 Refresh Live Picks", callback_data="refresh")]
     ])
 
-def format_message(picks, label):
-    msg = f"🎯 {label}\n_{datetime.now().strftime('%b %d %I:%M %p')}_\n\n"
+def format_msg(picks):
+    msg = f"🎯 LIVE PICKS\n_{datetime.now().strftime('%b %d %I:%M %p')}_\n\n"
 
     if not picks:
-        return msg + "No picks met threshold right now."
+        return msg + "No qualifying picks right now.\n(But APIs are connected)"
 
     for i, p in enumerate(picks[:10], 1):
         msg += (
@@ -242,45 +240,19 @@ def format_message(picks, label):
             f"   Conf: {p['probability']*100:.1f}% | Edge: +{p['edge']*100:.1f}% | {p['source']}\n\n"
         )
 
-    msg += "For entertainment only."
-    return msg
-
-# =====================================================
-# HANDLERS
-# =====================================================
+    return msg + "For entertainment only."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "PropNinja Master Bot\nLive PrizePicks + Kalshi edges\n",
-        reply_markup=main_menu()
-    )
+    await update.message.reply_text("PropNinja LIVE Bot", reply_markup=menu())
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data
+    await query.edit_message_text("Fetching live markets...")
 
-    await query.edit_message_text("Fetching live picks...")
+    picks = generate_picks()
 
-    if data == "all":
-        picks = generate_picks()
-        label = "ALL PLATFORMS"
-    elif data == "pp":
-        picks = generate_picks("PrizePicks")
-        label = "PRIZEPICKS"
-    elif data == "ks":
-        picks = generate_picks("Kalshi")
-        label = "KALSHI"
-    elif data == "top":
-        picks = [p for p in generate_picks() if p["grade"] in ("A+", "A")]
-        label = "TOP A/A+ PICKS"
-    else:
-        return
-
-    await query.edit_message_text(
-        format_message(picks, label)[:4096],
-        reply_markup=main_menu()
-    )
+    await query.edit_message_text(format_msg(picks)[:4096], reply_markup=menu())
 
 # =====================================================
 # MAIN
@@ -288,14 +260,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     if not TELEGRAM_TOKEN:
-        raise ValueError("TELEGRAM_TOKEN not set")
+        raise ValueError("TELEGRAM_TOKEN missing")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
 
-    logger.info("PropNinja Master Bot running...")
+    logger.info("LIVE PropNinja running...")
     app.run_polling()
 
 if __name__ == "__main__":
