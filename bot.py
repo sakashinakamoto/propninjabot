@@ -1,173 +1,203 @@
+# bot.py
+
+import os
 import math
+import logging
+import requests
 import random
 import json
-from dataclasses import dataclass, asdict
-from typing import Dict, Tuple, List
-import numpy as np
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+DECIMAL_ODDS = 1.90
+MIN_EDGE = 0.05
+NUM_SIMULATIONS = 10000
 
 
-# =========================
-# DATA STRUCTURES
-# =========================
+# ═══════════════════════════════════════════════════════
+# SPORT WEIGHTS
+# ═══════════════════════════════════════════════════════
 
-@dataclass
-class MatchupInput:
-    team_a: str
-    team_b: str
-    sport: str
-    metrics_a: Dict[str, float]
-    metrics_b: Dict[str, float]
-    home_field_advantage: float
-    rest_diff: float
-    injury_impact_a: float
-    injury_impact_b: float
-    historical_diff: float
-    market_odds_a: float
-    market_odds_b: float
+SPORT_WEIGHTS = {
+    "NBA": {
+        "off_rating": 0.35, "def_rating": 0.35, "pace": 0.05,
+        "rest": 0.05, "travel": 0.03, "home": 0.04,
+        "injury": 0.08, "historical": 0.05,
+    },
+    "NFL": {
+        "dvoa": 0.30, "epa": 0.25, "success": 0.15,
+        "rest": 0.08, "travel": 0.04, "home": 0.05,
+        "injury": 0.08, "historical": 0.05,
+    },
+    "NHL": {
+        "off_rating": 0.32, "def_rating": 0.32, "pace": 0.06,
+        "rest": 0.07, "travel": 0.05, "home": 0.05,
+        "injury": 0.08, "historical": 0.05,
+    },
+    "MLB": {
+        "off_rating": 0.28, "def_rating": 0.28, "pace": 0.04,
+        "rest": 0.10, "travel": 0.06, "home": 0.06,
+        "injury": 0.10, "historical": 0.08,
+    },
+    "DEFAULT": {
+        "off_rating": 0.33, "def_rating": 0.33, "pace": 0.05,
+        "rest": 0.06, "travel": 0.04, "home": 0.05,
+        "injury": 0.08, "historical": 0.06,
+    },
+}
+
+SPORT_STD = {
+    "NBA": 11.0,
+    "NFL": 9.5,
+    "NHL": 1.4,
+    "MLB": 2.8,
+    "EPL": 1.2,
+    "DEFAULT": 8.0,
+}
+
+SPORT_SCALE = {
+    "NBA": 112.0,
+    "NFL": 23.0,
+    "NHL": 3.0,
+    "MLB": 4.5,
+    "EPL": 1.4,
+    "DEFAULT": 50.0,
+}
 
 
-# =========================
-# UTILITY FUNCTIONS
-# =========================
+# ═══════════════════════════════════════════════════════
+# MATCHUP ENGINE
+# ═══════════════════════════════════════════════════════
 
-def american_to_decimal(odds: float) -> float:
-    if odds > 0:
-        return 1 + (odds / 100)
-    return 1 + (100 / abs(odds))
-
-
-def remove_vig(prob_a: float, prob_b: float) -> Tuple[float, float]:
-    total = prob_a + prob_b
-    return prob_a / total, prob_b / total
-
-
-def fractional_kelly(win_prob: float, decimal_odds: float, fraction: float = 0.25) -> float:
-    b = decimal_odds - 1
-    q = 1 - win_prob
-    kelly = (b * win_prob - q) / b if b > 0 else 0
-    return max(kelly * fraction, 0)
+class Matchup:
+    def __init__(self, team_a, team_b, sport, league):
+        self.team_a = team_a
+        self.team_b = team_b
+        self.sport = sport.upper()
+        self.league = league
+        self.metrics_a = {}
+        self.metrics_b = {}
+        self.situational_a = {}
+        self.situational_b = {}
+        self.injury_a = {}
+        self.injury_b = {}
+        self.historical = {}
+        self.market_odds = {}
 
 
-# =========================
-# CORE MODEL
-# =========================
+def compute_baseline(metrics, situational, injury, historical, weights, scale):
+    raw = 0.0
+    for k, v in metrics.items():
+        raw += weights.get(k, 0) * v
+    for k, v in situational.items():
+        raw += weights.get(k, 0) * v
+    for k, v in injury.items():
+        raw += weights.get(k, 0) * v
 
-class QuantEngine:
+    raw += weights.get("historical", 0) * historical.get("adjusted_point_diff", 0)
+    baseline = scale * (1.0 + raw * 0.12)
+    return max(baseline, scale * 0.5)
 
-    SPORT_STD = {
-        "NBA": 12.0,
-        "NFL": 10.0,
-        "MLB": 3.5
+
+def gauss_pair(mu_a, mu_b, sigma, corr=0.15):
+    z1 = sum(random.random() for _ in range(12)) - 6.0
+    z2 = sum(random.random() for _ in range(12)) - 6.0
+    z2_corr = corr * z1 + math.sqrt(1 - corr ** 2) * z2
+    return mu_a + sigma * z1, mu_b + sigma * z2_corr
+
+
+def monte_carlo(baseline_a, baseline_b, sport, n=NUM_SIMULATIONS):
+    sigma = SPORT_STD.get(sport, SPORT_STD["DEFAULT"])
+    scores_a, scores_b = [], []
+
+    for _ in range(n):
+        sa, sb = gauss_pair(baseline_a, baseline_b, sigma)
+        scores_a.append(sa)
+        scores_b.append(sb)
+
+    wins_a = sum(1 for a, b in zip(scores_a, scores_b) if a > b)
+    win_prob_a = wins_a / n
+    win_prob_b = 1.0 - win_prob_a
+
+    proj_a = sum(scores_a) / n
+    proj_b = sum(scores_b) / n
+
+    diffs = [a - b for a, b in zip(scores_a, scores_b)]
+    proj_spread = sum(diffs) / n
+    spread_std = math.sqrt(sum((d - proj_spread) ** 2 for d in diffs) / n)
+
+    sorted_a = sorted(scores_a)
+    sorted_b = sorted(scores_b)
+
+    ci_a = [sorted_a[int(0.05 * n)], sorted_a[int(0.95 * n)]]
+    ci_b = [sorted_b[int(0.05 * n)], sorted_b[int(0.95 * n)]]
+
+    mid = n // 2
+    med_a = sorted_a[mid]
+    med_b = sorted_b[mid]
+
+    sample_idx = [int(i * n / 20) for i in range(20)]
+    dist_sample = [(round(scores_a[i], 1), round(scores_b[i], 1)) for i in sample_idx]
+
+    return {
+        "TeamA_Score_Mean": round(proj_a, 2),
+        "TeamB_Score_Mean": round(proj_b, 2),
+        "TeamA_Score_Median": round(med_a, 2),
+        "TeamB_Score_Median": round(med_b, 2),
+        "TeamA_WinProb": round(win_prob_a, 4),
+        "TeamB_WinProb": round(win_prob_b, 4),
+        "Projected_Spread": round(proj_spread, 2),
+        "Spread_StdDev": round(spread_std, 2),
+        "ConfidenceIntervals": {
+            "TeamA_Score": [round(ci_a[0], 1), round(ci_a[1], 1)],
+            "TeamB_Score": [round(ci_b[0], 1), round(ci_b[1], 1)],
+        },
+        "Simulation_Distribution": dist_sample,
+        "Simulations": n,
     }
 
-    def __init__(self, simulations: int = 10000):
-        self.simulations = simulations
 
-    def aggregate_baseline(self, m: MatchupInput) -> float:
-        eff_diff = sum(m.metrics_a.values()) - sum(m.metrics_b.values())
-        situational = m.home_field_advantage + m.rest_diff
-        injury = m.injury_impact_b - m.injury_impact_a
-        historical = m.historical_diff
-        return eff_diff + situational + injury + historical
-
-    def monte_carlo(self, baseline_diff: float, sport: str) -> Tuple[np.ndarray, np.ndarray]:
-        std = self.SPORT_STD.get(sport, 10.0)
-
-        mean_a = 100 + baseline_diff / 2
-        mean_b = 100 - baseline_diff / 2
-
-        cov_matrix = [[std**2, 0.15 * std**2],
-                      [0.15 * std**2, std**2]]
-
-        scores = np.random.multivariate_normal(
-            [mean_a, mean_b],
-            cov_matrix,
-            self.simulations
-        )
-
-        return scores[:, 0], scores[:, 1]
-
-    def evaluate(self, m: MatchupInput) -> Dict:
-
-        baseline = self.aggregate_baseline(m)
-        scores_a, scores_b = self.monte_carlo(baseline, m.sport)
-
-        wins_a = np.sum(scores_a > scores_b)
-        win_prob_a = wins_a / self.simulations
-        win_prob_b = 1 - win_prob_a
-
-        mean_a = float(np.mean(scores_a))
-        mean_b = float(np.mean(scores_b))
-        spread = mean_a - mean_b
-        spread_std = float(np.std(scores_a - scores_b))
-
-        dec_a = american_to_decimal(m.market_odds_a)
-        dec_b = american_to_decimal(m.market_odds_b)
-
-        implied_a = 1 / dec_a
-        implied_b = 1 / dec_b
-
-        true_implied_a, true_implied_b = remove_vig(implied_a, implied_b)
-
-        ev_a = win_prob_a * (dec_a - 1) - (1 - win_prob_a)
-        ev_b = win_prob_b * (dec_b - 1) - (1 - win_prob_b)
-
-        if ev_a > 0 and ev_a > ev_b:
-            ev_bet = m.team_a
-            kelly = fractional_kelly(win_prob_a, dec_a)
-        elif ev_b > 0:
-            ev_bet = m.team_b
-            kelly = fractional_kelly(win_prob_b, dec_b)
-        else:
-            ev_bet = "No +EV"
-            kelly = 0.0
-
-        return {
-            "TeamA": m.team_a,
-            "TeamB": m.team_b,
-            "TeamA_Score_Mean": mean_a,
-            "TeamB_Score_Mean": mean_b,
-            "TeamA_WinProb": win_prob_a,
-            "TeamB_WinProb": win_prob_b,
-            "Projected_Spread": spread,
-            "Spread_StdDev": spread_std,
-            "EV_Bet": ev_bet,
-            "Kelly_Stake": kelly,
-            "ConfidenceIntervals": {
-                "TeamA_Score": [
-                    float(np.percentile(scores_a, 5)),
-                    float(np.percentile(scores_a, 95))
-                ],
-                "TeamB_Score": [
-                    float(np.percentile(scores_b, 5)),
-                    float(np.percentile(scores_b, 95))
-                ]
-            }
-        }
+def implied_prob(decimal_odds):
+    return round(1.0 / decimal_odds, 4) if decimal_odds > 0 else 0.5
 
 
-# =========================
-# EXECUTION ENTRY
-# =========================
+def compute_ev(win_prob, market_odds, stake=100):
+    profit = (market_odds - 1) * stake
+    ev = (win_prob * profit) - ((1 - win_prob) * stake)
+    b = market_odds - 1
+    kelly_raw = (win_prob * b - (1 - win_prob)) / b if b > 0 else 0
+    kelly_quarter = 0.25 * max(0, kelly_raw)
+    risk_adj_ev = ev * kelly_quarter
+    return round(ev, 2), round(kelly_quarter * stake, 2), round(risk_adj_ev, 2)
 
-if __name__ == "__main__":
 
-    sample_matchup = MatchupInput(
-        team_a="LAL",
-        team_b="BOS",
-        sport="NBA",
-        metrics_a={"off_rating": 3.2, "def_rating": -1.4, "pace": 1.1},
-        metrics_b={"off_rating": 1.5, "def_rating": -0.8, "pace": 0.6},
-        home_field_advantage=2.5,
-        rest_diff=1.0,
-        injury_impact_a=-0.5,
-        injury_impact_b=-1.2,
-        historical_diff=1.3,
-        market_odds_a=-110,
-        market_odds_b=-110
+# ═══════════════════════════════════════════════════════
+# TELEGRAM BOT
+# ═══════════════════════════════════════════════════════
+
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "PropNinja Bot\n"
+        "Live picks + Monte Carlo simulations\n\n"
+        "Use /picks or /top",
     )
 
-    engine = QuantEngine(simulations=10000)
-    result = engine.evaluate(sample_matchup)
 
-    print(json.dumps(result, indent=4))
+def main():
+    if not TELEGRAM_TOKEN:
+        raise ValueError("TELEGRAM_TOKEN missing!")
+
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+
+    logger.info("PropNinja Bot is running")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
