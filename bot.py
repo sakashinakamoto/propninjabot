@@ -17,19 +17,19 @@ MIN_EDGE = 0.05
 NUM_SIMS = 10000
 
 SPORT_EMOJI = {
-‘NBA’: ‘BBALL’, ‘NFL’: ‘FTBALL’, ‘MLB’: ‘BSBALL’,
-‘NHL’: ‘HOCKEY’, ‘EPL’: ‘SOCCER’, ‘UFC’: ‘MMA’,
-‘GOLF’: ‘GOLF’, ‘TENNIS’: ‘TENNIS’, ‘SOCCER’: ‘SOCCER’,
+    "NBA": "BBALL", "NFL": "FTBALL", "MLB": "BSBALL",
+    "NHL": "HOCKEY", "EPL": "SOCCER", "UFC": "MMA",
+    "GOLF": "GOLF", "TENNIS": "TENNIS", "SOCCER": "SOCCER",
 }
 
 SPORT_STD = {
-‘NBA’: 11.0, ‘NFL’: 9.5, ‘NHL’: 1.4,
-‘MLB’: 2.8, ‘EPL’: 1.2, ‘DEFAULT’: 8.0,
+    "NBA": 11.0, "NFL": 9.5, "NHL": 1.4,
+    "MLB": 2.8, "EPL": 1.2, "DEFAULT": 8.0,
 }
 
 SPORT_SCALE = {
-‘NBA’: 112.0, ‘NFL’: 23.0, ‘NHL’: 3.0,
-‘MLB’: 4.5, ‘EPL’: 1.4, ‘DEFAULT’: 50.0,
+    "NBA": 112.0, "NFL": 23.0, "NHL": 3.0,
+    "MLB": 4.5, "EPL": 1.4, "DEFAULT": 50.0,
 }
 
 def quantum_boost(prob):
