@@ -665,5 +665,5 @@ app.add_handler(CallbackQueryHandler(button))
 logger.info(“PropNinja Bot is running”)
 app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if **name** == “**main**”:
+if **name** == "**main**":
 main()
