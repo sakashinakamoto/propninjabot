@@ -10,16 +10,16 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(**name**)
 
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '')
+TELEGRAM_TOKEN = os.environ.get(‘TELEGRAM_TOKEN’, ‘’)
 DECIMAL_ODDS = 1.90
 MIN_PROB = 0.60
 MIN_EDGE = 0.05
 NUM_SIMS = 10000
 
 SPORT_EMOJI = {
-'NBA': 'BBALL', 'NFL': 'FTBALL', 'MLB': 'BSBALL',
-'NHL': 'HOCKEY', 'EPL': 'SOCCER', 'UFC': 'MMA',
-'GOLF': 'GOLF', 'TENNIS': 'TENNIS', 'SOCCER': 'SOCCER',
+‘NBA’: ‘BBALL’, ‘NFL’: ‘FTBALL’, ‘MLB’: ‘BSBALL’,
+‘NHL’: ‘HOCKEY’, ‘EPL’: ‘SOCCER’, ‘UFC’: ‘MMA’,
+‘GOLF’: ‘GOLF’, ‘TENNIS’: ‘TENNIS’, ‘SOCCER’: ‘SOCCER’,
 }
 
 SPORT_STD = {
@@ -581,14 +581,14 @@ if d.startswith('sport_'):
 
 def main():
 if not TELEGRAM_TOKEN:
-raise ValueError('TELEGRAM_TOKEN missing!')
+raise ValueError(‘TELEGRAM_TOKEN missing!’)
 app = Application.builder().token(TELEGRAM_TOKEN).build()
-app.add_handler(CommandHandler('start', start))
+app.add_handler(CommandHandler(‘start’, start))
 app.add_handler(CommandHandler(‘picks’, picks_cmd))
 app.add_handler(CommandHandler(‘top’,   top_cmd))
 app.add_handler(CallbackQueryHandler(button))
 logger.info(‘PropNinja Bot is running’)
 app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if **name** == '**main**':
+if **name** == ‘**main**’:
 main()
