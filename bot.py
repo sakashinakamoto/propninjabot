@@ -11,7 +11,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(**name**)
 
-TELEGRAM_TOKEN = os.environ.get(“TELEGRAM_TOKEN”, “”)
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN”, "")
 DECIMAL_ODDS = 1.90
 MIN_PROB = 0.60
 MIN_EDGE = 0.05
