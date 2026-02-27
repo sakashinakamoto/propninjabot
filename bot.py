@@ -11,14 +11,15 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 DECIMAL_ODDS = 1.90
-MIN_PROB = 0.60
-MIN_EDGE = 0.05
 
-def compute_edge(line, stat):
+
+def compute_model(line, stat, liquidity=1.0):
     if line <= 0:
-        return 0, 0, 0
+        return None
+
     boost = 0.055
     s = stat.lower()
+
     if "assist" in s: boost += 0.010
     elif "point" in s: boost += 0.008
     elif "rebound" in s: boost -= 0.005
@@ -26,17 +27,40 @@ def compute_edge(line, stat):
     elif "shot" in s: boost += 0.006
     elif "strikeout" in s: boost += 0.009
     elif "hit" in s: boost += 0.005
+
     projection = line * (1 + boost)
-    std_dev = line * 0.18
+    std_dev = max(line * 0.18, 0.1)
+
     z = (projection - line) / std_dev
-    prob = 0.5 * (1 + math.erf(z / math.sqrt(2)))
-    edge = prob - (1 / DECIMAL_ODDS)
-    return round(projection, 2), round(prob, 4), round(edge, 4)
+    prob_over = 0.5 * (1 + math.erf(z / math.sqrt(2)))
+    prob_under = 1 - prob_over
+
+    implied = 1 / DECIMAL_ODDS
+    edge_over = prob_over - implied
+    edge_under = prob_under - implied
+
+    liquidity_weight = 1 + min(math.log10(liquidity + 1), 2)
+
+    score_over = edge_over * liquidity_weight
+    score_under = edge_under * liquidity_weight
+
+    return {
+        "projection": round(projection, 2),
+        "prob_over": round(prob_over, 4),
+        "prob_under": round(prob_under, 4),
+        "edge_over": round(edge_over, 4),
+        "edge_under": round(edge_under, 4),
+        "score_over": round(score_over, 4),
+        "score_under": round(score_under, 4),
+    }
+
 
 def grade(edge):
+    edge = abs(edge)
     if edge >= 0.12: return "A"
     if edge >= 0.09: return "B"
     return "C"
+
 
 def fetch_prizepicks():
     picks = []
@@ -48,10 +72,11 @@ def fetch_prizepicks():
             timeout=15
         )
         if resp.status_code != 200:
-            logger.warning("PrizePicks status: " + str(resp.status_code))
             return []
+
         data = resp.json()
         players = {}
+
         for item in data.get("included", []):
             if item.get("type") == "new_player":
                 attrs = item.get("attributes", {})
@@ -59,42 +84,54 @@ def fetch_prizepicks():
                     "name": attrs.get("display_name", "Unknown"),
                     "team": attrs.get("team", ""),
                 }
+
         for proj in data.get("data", []):
             attrs = proj.get("attributes", {})
             line = attrs.get("line_score")
             stat = attrs.get("stat_type", "")
             sport = attrs.get("league", "")
+
             if not line or not stat:
                 continue
+
             try:
                 line = float(line)
             except Exception:
                 continue
+
             pid = proj.get("relationships", {}).get("new_player", {}).get("data", {}).get("id", "")
             pinfo = players.get(pid, {"name": attrs.get("description", "Unknown"), "team": ""})
-            projection, prob, edg = compute_edge(line, stat)
-            if prob >= MIN_PROB and edg >= MIN_EDGE:
+
+            model = compute_model(line, stat, liquidity=1000)
+            if not model:
+                continue
+
+            for side in ["OVER", "UNDER"]:
                 picks.append({
                     "player": pinfo["name"],
                     "team": pinfo["team"],
                     "stat": stat,
                     "line": line,
-                    "proj": projection,
-                    "prob": prob,
-                    "edge": edg,
-                    "grade": grade(edg),
-                    "pick": "OVER",
+                    "proj": model["projection"],
+                    "prob": model["prob_over"] if side == "OVER" else model["prob_under"],
+                    "edge": model["edge_over"] if side == "OVER" else model["edge_under"],
+                    "score": model["score_over"] if side == "OVER" else model["score_under"],
+                    "grade": grade(model["edge_over"] if side == "OVER" else model["edge_under"]),
+                    "pick": side,
                     "source": "PrizePicks",
                     "sport": sport.upper(),
                 })
-        logger.info("PrizePicks: " + str(len(picks)) + " picks")
-    except Exception as e:
-        logger.warning("PrizePicks error: " + str(e))
+
+    except Exception:
+        return []
+
     return picks
+
 
 def fetch_kalshi():
     picks = []
     keywords = ["points", "assists", "rebounds", "goals", "shots", "strikeouts", "hits", "yards", "touchdowns"]
+
     try:
         resp = requests.get(
             "https://trading-api.kalshi.com/trade-api/v2/markets",
@@ -103,13 +140,15 @@ def fetch_kalshi():
             timeout=15
         )
         if resp.status_code != 200:
-            logger.warning("Kalshi status: " + str(resp.status_code))
             return []
+
         for market in resp.json().get("markets", []):
             title = market.get("title", "")
             category = market.get("category", "").upper()
+
             if not any(kw in title.lower() for kw in keywords):
                 continue
+
             line = 0.0
             for w in title.replace("+", " ").replace(",", "").split():
                 try:
@@ -119,76 +158,86 @@ def fetch_kalshi():
                         break
                 except ValueError:
                     continue
+
             if line <= 0:
                 continue
+
             stat = market.get("subtitle", title[:30])
             sport = category if category else "KALSHI"
-            projection, prob, edg = compute_edge(line, stat)
-            if prob >= MIN_PROB and edg >= MIN_EDGE:
+
+            volume = market.get("volume", 0)
+            open_interest = market.get("open_interest", 0)
+            liquidity = volume + open_interest
+
+            model = compute_model(line, stat, liquidity=liquidity)
+            if not model:
+                continue
+
+            for side in ["OVER", "UNDER"]:
                 picks.append({
                     "player": title[:40],
                     "team": "",
                     "stat": stat[:30],
                     "line": line,
-                    "proj": projection,
-                    "prob": prob,
-                    "edge": edg,
-                    "grade": grade(edg),
-                    "pick": "OVER",
+                    "proj": model["projection"],
+                    "prob": model["prob_over"] if side == "OVER" else model["prob_under"],
+                    "edge": model["edge_over"] if side == "OVER" else model["edge_under"],
+                    "score": model["score_over"] if side == "OVER" else model["score_under"],
+                    "grade": grade(model["edge_over"] if side == "OVER" else model["edge_under"]),
+                    "pick": side,
                     "source": "Kalshi",
                     "sport": sport,
                 })
-        logger.info("Kalshi: " + str(len(picks)) + " picks")
-    except Exception as e:
-        logger.warning("Kalshi error: " + str(e))
+
+    except Exception:
+        return []
+
     return picks
 
-BACKUP = [
-    {"player": "Kevin Durant", "team": "HOU", "stat": "Points", "line": 26.5, "proj": 28.3, "prob": 0.841, "edge": 0.314, "grade": "A", "pick": "OVER", "source": "PrizePicks", "sport": "NBA"},
-    {"player": "LaMelo Ball", "team": "CHA", "stat": "Assists", "line": 7.5, "proj": 8.1, "prob": 0.821, "edge": 0.295, "grade": "A", "pick": "OVER", "source": "PrizePicks", "sport": "NBA"},
-    {"player": "Nathan MacKinnon", "team": "COL", "stat": "Points", "line": 0.5, "proj": 0.6, "prob": 0.814, "edge": 0.288, "grade": "A", "pick": "OVER", "source": "PrizePicks", "sport": "NHL"},
-    {"player": "Bukayo Saka", "team": "ARS", "stat": "Shots on Target", "line": 1.5, "proj": 1.6, "prob": 0.798, "edge": 0.271, "grade": "A", "pick": "OVER", "source": "PrizePicks", "sport": "EPL"},
-    {"player": "Shohei Ohtani", "team": "LAD", "stat": "Total Bases", "line": 1.5, "proj": 1.6, "prob": 0.781, "edge": 0.254, "grade": "A", "pick": "OVER", "source": "PrizePicks", "sport": "MLB"},
-]
 
 def get_all_picks():
     pp = fetch_prizepicks()
     kl = fetch_kalshi()
     all_picks = pp + kl
+
     if not all_picks:
-        logger.warning("No live picks found, using backup")
-        return BACKUP
-    all_picks.sort(key=lambda x: x["edge"], reverse=True)
+        return []
+
+    all_picks.sort(key=lambda x: x["score"], reverse=True)
+
     seen = set()
     unique = []
+
     for p in all_picks:
-        key = p["player"] + p["stat"] + str(p["line"])
+        key = p["player"] + p["stat"] + str(p["line"]) + p["pick"]
         if key not in seen:
             seen.add(key)
             unique.append(p)
-    return unique[:20]
+
+    return unique[:40]
+
 
 def get_by_sport(sport):
     all_picks = get_all_picks()
-    filtered = [p for p in all_picks if p["sport"].upper() == sport.upper()]
-    if not filtered:
-        filtered = [p for p in BACKUP if p["sport"].upper() == sport.upper()]
-    return filtered
+    return [p for p in all_picks if p["sport"].upper() == sport.upper()]
+
 
 def fmt(picks, label):
     ts = datetime.now().strftime("%b %d %I:%M %p")
     total = len(picks)
     msg = "PROPNINJA - " + label + "\n" + ts + " | " + str(total) + " picks found\n\n"
-    for i, p in enumerate(picks[:10], 1):
-        src = p["source"]
-        msg += str(i) + ". " + p["grade"] + " " + p["player"]
+
+    for i, p in enumerate(picks[:40], 1):
+        msg += f"{i}. {p['grade']} {p['player']}"
         if p["team"]:
-            msg += " (" + p["team"] + ")"
-        msg += " [" + src + "]\n"
-        msg += "   " + p["stat"] + " | Line: " + str(p["line"]) + " Proj: " + str(p["proj"]) + "\n"
-        msg += "   " + p["pick"] + " | Conf: " + str(round(p["prob"]*100, 1)) + "% | Edge: +" + str(round(p["edge"]*100, 1)) + "% | " + p["sport"] + "\n\n"
+            msg += f" ({p['team']})"
+        msg += f" [{p['source']}]\n"
+        msg += f"   {p['stat']} | Line: {p['line']} Proj: {p['proj']}\n"
+        msg += f"   {p['pick']} | Conf: {round(p['prob']*100,1)}% | Edge: {round(p['edge']*100,1)}% | Score: {round(p['score']*100,2)} | {p['sport']}\n\n"
+
     msg += "For entertainment only. Gamble responsibly."
     return msg
+
 
 def menu():
     return InlineKeyboardMarkup([
@@ -199,10 +248,8 @@ def menu():
         [InlineKeyboardButton("NHL", callback_data="sport_NHL"),
          InlineKeyboardButton("EPL", callback_data="sport_EPL"),
          InlineKeyboardButton("UFC", callback_data="sport_UFC")],
-        [InlineKeyboardButton("PrizePicks Only", callback_data="src_PrizePicks"),
-         InlineKeyboardButton("Kalshi Only", callback_data="src_Kalshi")],
-        [InlineKeyboardButton("How It Works", callback_data="howto")],
     ])
+
 
 def nav(cb):
     return InlineKeyboardMarkup([
@@ -210,19 +257,19 @@ def nav(cb):
         [InlineKeyboardButton("Main Menu", callback_data="menu")],
     ])
 
+
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "PropNinja Bot\n"
-        "Live picks from PrizePicks and Kalshi\n"
-        "NBA, NFL, MLB, NHL, EPL, UFC and more\n\n"
-        "Tap below to get picks:",
+        "PropNinja Bot\nLive ranked picks from PrizePicks & Kalshi\n\nTap below:",
         reply_markup=menu()
     )
 
+
 async def picks_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Fetching all live picks...")
+    await update.message.reply_text("Fetching live ranked slate...")
     picks = get_all_picks()
     await update.message.reply_text(fmt(picks, "ALL SPORTS")[:4096])
+
 
 async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -230,61 +277,32 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     d = q.data
 
     if d == "menu":
-        await q.edit_message_text("PropNinja - Choose:", reply_markup=menu())
-        return
-
-    if d == "howto":
-        await q.edit_message_text(
-            "How PropNinja Works\n\n"
-            "1. Pulls live lines from PrizePicks and Kalshi\n"
-            "2. Applies stat-specific boost corrections\n"
-            "3. Calculates hit probability via normal distribution\n"
-            "4. Computes edge vs implied probability at 1.9x odds\n"
-            "5. Only shows picks with 60%+ confidence and 5%+ edge\n\n"
-            "Grade A = edge 12%+\n"
-            "Grade B = edge 9%+\n"
-            "Grade C = edge 5%+\n\n"
-            "Entertainment only. Gamble responsibly.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu")]])
-        )
+        await q.edit_message_text("Choose:", reply_markup=menu())
         return
 
     if d == "all":
-        await q.edit_message_text("Fetching all live picks from PrizePicks and Kalshi...")
         picks = get_all_picks()
         await q.edit_message_text(fmt(picks, "ALL SPORTS")[:4096], reply_markup=nav("all"))
         return
 
-    if d.startswith("src_"):
-        src = d.split("_", 1)[1]
-        await q.edit_message_text("Fetching " + src + " picks...")
-        all_picks = get_all_picks()
-        picks = [p for p in all_picks if p["source"] == src]
-        if not picks:
-            await q.edit_message_text("No " + src + " picks right now.", reply_markup=nav(d))
-            return
-        await q.edit_message_text(fmt(picks, src)[:4096], reply_markup=nav(d))
-        return
-
     if d.startswith("sport_"):
         sport = d.split("_", 1)[1]
-        await q.edit_message_text("Fetching " + sport + " picks...")
         picks = get_by_sport(sport)
-        if not picks:
-            await q.edit_message_text("No " + sport + " picks right now. Try All Live Picks.", reply_markup=nav(d))
-            return
         await q.edit_message_text(fmt(picks, sport)[:4096], reply_markup=nav(d))
         return
+
 
 def main():
     if not TELEGRAM_TOKEN:
         raise ValueError("TELEGRAM_TOKEN missing!")
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("picks", picks_cmd))
     app.add_handler(CallbackQueryHandler(button))
-    logger.info("PropNinja Bot is running")
+
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
