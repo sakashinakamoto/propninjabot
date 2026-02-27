@@ -29,10 +29,10 @@ logger = logging.getLogger(__name__)
 PRIZEPICKS_URL = "https://api.prizepicks.com/projections"
 KALSHI_URL = "https://trading-api.kalshi.com/trade-api/v2/markets"
 
-MIN_PROB = 0.60
-MIN_EDGE = 0.05
+MIN_PROB = 0.51
+MIN_EDGE = 0.025
 MAX_PICKS = 25
-REQUEST_TIMEOUT = 15
+REQUEST_TIMEOUT = 0
 MAX_RETRIES = 3
 
 # -------------------------------
