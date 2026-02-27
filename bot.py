@@ -190,7 +190,7 @@ try:
 line = float(line)
 except Exception:
 continue
-pid = proj.get('relationships', {}).get('new_player', {}).get('data', {}).get('id
+pid = proj.get('relationships', {}).get('new_player', {}).get('data', {}).get("id
 pinfo = players.get(pid, {'name': attrs.get('description', 'Unknown'), 'team': ''
 projection, prob, edg = compute_edge(line, stat)
 if prob >= MIN_PROB and edg >= MIN_EDGE:
