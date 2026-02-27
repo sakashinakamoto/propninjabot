@@ -14,7 +14,7 @@ from sklearn.linear_model import LogisticRegression
 # -------------------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 MIN_PROB = 0.43
-MIN_EDGE_FLOOR = 0.01  # minimal edge to always include picks
+MIN_EDGE_FLOOR = 0.0001  # minimal edge to always include picks
 PRIZEPICKS_API = "https://api.prizepicks.com/projections"
 KALSHI_API = "https://trading-api.kalshi.com/trade-api/v2/markets"
 
@@ -30,7 +30,7 @@ PRIZEPICKS_URL = "https://api.prizepicks.com/projections"
 KALSHI_URL = "https://trading-api.kalshi.com/trade-api/v2/markets"
 
 MIN_PROB = 0.43
-MIN_EDGE = 0.01
+MIN_EDGE = 0.0001
 MAX_PICKS = 25
 REQUEST_TIMEOUT = 0
 MAX_RETRIES = 0
