@@ -56,76 +56,95 @@ def kelly(prob, odds=1.90):
 
 def fetch_prizepicks():
     picks = []
+
     try:
-        url = "https://partner-api.prizepicks.com/projections?per_page=1000"
-        resp = requests.get(url, headers={"Content-Type": "application/json"}, timeout=15)
+        resp = requests.get(
+            'https://api.prizepicks.com/projections',
+            params={'per_page': 250, 'single_stat': True},
+            headers={'Content-Type': 'application/json'},
+            timeout=15
+        )
+
         if resp.status_code != 200:
-            url2 = "https://api.prizepicks.com/projections"
-            resp = requests.get(
-                url2,
-                params={"per_page": 250, "single_stat": True},
-                headers={"Content-Type": "application/json"},
-                timeout=15
-            )
-            if resp.status_code != 200:
-                logger.warning("PrizePicks both endpoints failed: " + str(resp.status_code))
-                return []
+            logger.warning('PrizePicks status: ' + str(resp.status_code))
+            return []
+
         data = resp.json()
+
+        if not isinstance(data, dict):
+            logger.warning('PrizePicks returned invalid JSON structure')
+            return []
+
         players = {}
-        for item in data.get("included", []):
-            t = item.get("type", "")
-            if t in ("new_player", "player"):
-                attrs = item.get("attributes", {})
-                players[item["id"]] = {
-                    "name": attrs.get("display_name") or attrs.get("name", "Unknown"),
-                    "team": attrs.get("team", ""),
-                    "position": attrs.get("position", ""),
-                }for proj in data.get("data", ""):
-            attrs = proj.get("attributes", {})
-            line = attrs.get("line_score")
-            stat = attrs.get("stat_type", "")
-            sport = attrs.get("league", "")
-            status = attrs.get("status", "")
-            if status in ("disabled", "locked"):
+
+        # Build player lookup table
+        for item in data.get('included', []):
+            if not isinstance(item, dict):
                 continue
-            if not line or not stat:
+
+            if item.get('type') == 'new_player':
+                attrs = item.get('attributes', {})
+                player_id = item.get('id')
+
+                if player_id:
+                    players[player_id] = {
+                        'name': attrs.get('display_name', 'Unknown'),
+                        'team': attrs.get('team', '')
+                    }
+
+        # Process projections
+        for proj in data.get('data', []):
+            if not isinstance(proj, dict):
                 continue
+
+            attrs = proj.get('attributes', {})
+            if not isinstance(attrs, dict):
+                continue
+
+            line = attrs.get('line_score')
+            stat = attrs.get('stat_type', '')
+            sport = attrs.get('league', '')
+
+            if line is None or not stat:
+                continue
+
             try:
                 line = float(line)
-            except Exception:
+            except:
                 continue
-            pid = ""
-            rels = proj.get("relationships", {})
-            for key in ("new_player", "player"):
-                pid = rels.get(key, {}).get("data", {}).get("id", "")
-                if pid:
-                    break
-            pinfo = players.get(pid, {
-                "name": attrs.get("description", attrs.get("name", "Unknown")),
-                "team": "",
-                "position": "",
+
+            relationships = proj.get('relationships', {})
+            new_player = relationships.get('new_player', {})
+            player_data = new_player.get('data', {})
+            player_id = player_data.get('id')
+
+            pinfo = players.get(player_id, {
+                'name': attrs.get('description', 'Unknown'),
+                'team': ''
             })
-            proj_val, prob, edg = propninja_score(line, stat)
-            if edg >= MIN_EDGE:
-                k = kelly(prob)
+
+            projection, prob, edg = compute_edge(line, stat)
+
+            if prob >= MIN_PROB and edg >= MIN_EDGE:
                 picks.append({
-                    "player":   pinfo["name"],
-                    "team":     pinfo["team"],
-                    "stat":     stat,
-                    "line":     line,
-                    "proj":     proj_val,
-                    "prob":     prob,
-                    "edge":     edg,
-                    "kelly":    k,
-                    "grade":    grade(edg),
-                    "pick":     "OVER",
-                    "source":   "PrizePicks",
-                    "sport":    sport.upper(),
+                    'player': pinfo['name'],
+                    'team': pinfo['team'],
+                    'stat': stat,
+                    'line': line,
+                    'proj': projection,
+                    'prob': prob,
+                    'edge': edg,
+                    'grade': grade(edg),
+                    'pick': 'OVER',
+                    'source': 'PrizePicks',
+                    'sport': str(sport).upper()
                 })
-        picks.sort(key=lambda x: x["edge"], reverse=True)
-        logger.info("PrizePicks: " + str(len(picks)) + " picks loaded")
+
+        logger.info('PrizePicks live qualified picks: ' + str(len(picks)))
+
     except Exception as e:
-        logger.warning("PrizePicks fetch error: " + str(e))
+        logger.warning('PrizePicks error: ' + str(e))
+
     return picks
 
 def fetch_kalshi():
