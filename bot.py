@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-‘’’
-QuantPicks Elite — Open Access Build (No Subscription)
-Deploy on Render as a Web Service. Start command: python bot.py
-
-=== REQUIRED ENV VARS (set in Render dashboard) ===
-TELEGRAM_TOKEN  — From @BotFather
-ODDS_API_KEY    — From https://the-odds-api.com (free tier: 500 req/mo)
-ADMIN_CHAT_ID   — Your personal Telegram chat ID (get from @userinfobot)
-PORT            — Auto-set by Render (default 8080)
-DB_PATH         — Optional: /data/quantpicks.db (requires Render disk addon)
-
-=== requirements.txt ===
-python-telegram-bot>=20.7
-numpy
-flask
-requests
-‘’’
 
 import os
 import logging
@@ -42,9 +25,9 @@ ContextTypes,
 
 logging.basicConfig(
 level=logging.INFO,
-format=’%(asctime)s [%(levelname)s] %(name)s — %(message)s’,
+format=’%(asctime)s [%(levelname)s] %(name)s - %(message)s’,
 )
-log = logging.getLogger(‘QuantPicks’)
+log = logging.getLogger(‘propninjabot’)
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -56,7 +39,7 @@ TELEGRAM_TOKEN = os.environ.get(‘TELEGRAM_TOKEN’, ‘’)
 ODDS_API_KEY   = os.environ.get(‘ODDS_API_KEY’, ‘’)
 ADMIN_CHAT_ID  = int(os.environ.get(‘ADMIN_CHAT_ID’, ‘0’))
 PORT           = int(os.environ.get(‘PORT’, ‘8080’))
-DB_PATH        = os.environ.get(‘DB_PATH’, ‘quantpicks.db’)
+DB_PATH        = os.environ.get(‘DB_PATH’, ‘propninjabot.db’)
 
 VALID_SPORTS = [‘NBA’, ‘NFL’, ‘MLB’, ‘NHL’, ‘NCAAB’, ‘NCAAF’, ‘EPL’]
 
@@ -75,25 +58,25 @@ return sqlite3.connect(DB_PATH, check_same_thread=False)
 def init_db() -> None:
 conn = _db_connect()
 c = conn.cursor()
-c.execute(’’’
-CREATE TABLE IF NOT EXISTS users (
-chat_id  INTEGER PRIMARY KEY,
-username TEXT,
-joined   TEXT
+c.execute(
+‘CREATE TABLE IF NOT EXISTS users (’
+‘chat_id  INTEGER PRIMARY KEY,’
+‘username TEXT,’
+‘joined   TEXT’
+‘)’
 )
-‘’’)
-c.execute(’’’
-CREATE TABLE IF NOT EXISTS picks_log (
-id        INTEGER PRIMARY KEY AUTOINCREMENT,
-chat_id   INTEGER,
-sport     TEXT,
-matchup   TEXT,
-ev_bet    TEXT,
-win_prob  REAL,
-kelly     REAL,
-timestamp TEXT
+c.execute(
+‘CREATE TABLE IF NOT EXISTS picks_log (’
+‘id        INTEGER PRIMARY KEY AUTOINCREMENT,’
+‘chat_id   INTEGER,’
+‘sport     TEXT,’
+‘matchup   TEXT,’
+‘ev_bet    TEXT,’
+‘win_prob  REAL,’
+‘kelly     REAL,’
+‘timestamp TEXT’
+‘)’
 )
-‘’’)
 conn.commit()
 conn.close()
 log.info(‘Database ready at %s’, DB_PATH)
@@ -101,10 +84,10 @@ log.info(‘Database ready at %s’, DB_PATH)
 def upsert_user(chat_id: int, username: str) -> None:
 conn = _db_connect()
 c = conn.cursor()
-c.execute(’’’
-INSERT OR IGNORE INTO users (chat_id, username, joined)
-VALUES (?, ?, ?)
-‘’’, (chat_id, username, datetime.utcnow().isoformat()))
+c.execute(
+‘INSERT OR IGNORE INTO users (chat_id, username, joined) VALUES (?, ?, ?)’,
+(chat_id, username, datetime.utcnow().isoformat())
+)
 conn.commit()
 conn.close()
 
@@ -118,11 +101,11 @@ kelly: float,
 ) -> None:
 conn = _db_connect()
 c = conn.cursor()
-c.execute(’’’
-INSERT INTO picks_log (chat_id, sport, matchup, ev_bet, win_prob, kelly, timestamp)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-‘’’, (chat_id, sport, matchup, ev_bet, win_prob, kelly,
-datetime.utcnow().isoformat()))
+c.execute(
+’INSERT INTO picks_log (chat_id, sport, matchup, ev_bet, win_prob, kelly, timestamp) ’
+‘VALUES (?, ?, ?, ?, ?, ?, ?)’,
+(chat_id, sport, matchup, ev_bet, win_prob, kelly, datetime.utcnow().isoformat())
+)
 conn.commit()
 conn.close()
 
@@ -174,7 +157,8 @@ cov = [
     [0.15 * std ** 2, std ** 2],
 ]
 scores = np.random.multivariate_normal([mean_a, mean_b], cov, simulations)
-sa, sb = scores[:, 0], scores[:, 1]
+sa = scores[:, 0]
+sb = scores[:, 1]
 
 win_prob_a = float(np.mean(sa > sb))
 win_prob_b = 1.0 - win_prob_a
@@ -214,8 +198,8 @@ return {
     'kelly':         kelly,
     'edge':          edge,
     'win_prob_pick': win_prob_pick,
-    'ci_a':          [float(np.percentile(sa, 5)), float(np.percentile(sa, 95))],
-    'ci_b':          [float(np.percentile(sb, 5)), float(np.percentile(sb, 95))],
+    'ci_a': [float(np.percentile(sa, 5)), float(np.percentile(sa, 95))],
+    'ci_b': [float(np.percentile(sb, 5)), float(np.percentile(sb, 95))],
 }
 ```
 
@@ -239,7 +223,7 @@ def fetch_live_odds(sport: str) -> List[dict]:
 sport_key = SPORT_KEYS.get(sport)
 if not sport_key or not ODDS_API_KEY:
 return []
-url = f’https://api.the-odds-api.com/v4/sports/{sport_key}/odds/’
+url = ‘https://api.the-odds-api.com/v4/sports/’ + sport_key + ‘/odds/’
 params = {
 ‘apiKey’:     ODDS_API_KEY,
 ‘regions’:    ‘us’,
@@ -302,37 +286,38 @@ spread_std = result[‘spread_std’]
 edge       = result[‘edge’] * 100.0
 kelly      = result[‘kelly’] * 100.0
 ev_bet     = result[‘ev_bet’]
-stars      = ‘⭐’ * min(5, max(1, int(edge / 3.0)))
+stars      = ‘*’ * min(5, max(1, int(edge / 3.0)))
 ci_a       = result[‘ci_a’]
 ci_b       = result[‘ci_b’]
 timestamp  = datetime.utcnow().strftime(’%b %d %Y  %H:%M UTC’)
 
 ```
 lines = [
-    '━━━━━━━━━━━━━━━━━━━━━━━━',
-    '🎯 *QUANTPICKS ELITE*',
-    f'📊 `{sport}`  ·  _{timestamp}_',
-    '━━━━━━━━━━━━━━━━━━━━━━━━',
-    f'🏠 *{a}*',
-    f'✈️  *{b}*',
+    '----------------------------------------',
+    '  PROPNINJABOT  |  QUANTPICKS ELITE',
+    '----------------------------------------',
+    'Sport : ' + sport + '   ' + timestamp,
     '',
-    '📈 *Win Probability*',
-    f'  {a}:  `{wp_a:.1f}%`',
-    f'  {b}:  `{wp_b:.1f}%`',
+    'HOME  : ' + a,
+    'AWAY  : ' + b,
     '',
-    f'📐 Projected Spread:  `{spread:+.1f}`  (±{spread_std:.1f})',
+    'WIN PROBABILITY',
+    '  ' + a + ' : ' + f'{wp_a:.1f}' + '%',
+    '  ' + b + ' : ' + f'{wp_b:.1f}' + '%',
     '',
-    f'💡 *+EV Pick:*  `{ev_bet}`',
-    f'🔥 Model Edge:  `{edge:.2f}%`  {stars}',
-    f'💰 Kelly Stake (0.25×):  `{kelly:.2f}%` of bankroll',
+    'PROJECTED SPREAD : ' + f'{spread:+.1f}' + '  (+-' + f'{spread_std:.1f}' + ')',
     '',
-    '📊 *90% Score Confidence Intervals*',
-    f'  {a}:  `{ci_a[0]:.1f} – {ci_a[1]:.1f}`',
-    f'  {b}:  `{ci_b[0]:.1f} – {ci_b[1]:.1f}`',
+    '+EV PICK   : ' + ev_bet,
+    'MODEL EDGE : ' + f'{edge:.2f}' + '%  ' + stars,
+    'KELLY (0.25x) : ' + f'{kelly:.2f}' + '% of bankroll',
     '',
-    'Simulations: `20,000`',
-    '━━━━━━━━━━━━━━━━━━━━━━━━',
-    '_Past performance does not guarantee future results._',
+    '90% CONFIDENCE INTERVALS',
+    '  ' + a + ' : ' + f'{ci_a[0]:.1f}' + ' to ' + f'{ci_a[1]:.1f}',
+    '  ' + b + ' : ' + f'{ci_b[0]:.1f}' + ' to ' + f'{ci_b[1]:.1f}',
+    '',
+    'Simulations : 20,000',
+    '----------------------------------------',
+    'Past results do not guarantee future outcomes.',
 ]
 return '\n'.join(lines)
 ```
@@ -347,52 +332,48 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 chat_id  = update.effective_chat.id
 username = update.effective_user.username or ‘unknown’
 upsert_user(chat_id, username)
-
-```
 text = (
-    '🏆 *Welcome to QuantPicks Elite*\n\n'
-    'Institutional-grade sports analytics — Monte Carlo simulation, '
-    'Kelly Criterion stake sizing, and live market edge detection.\n\n'
-    '━━━━━━━━━━━━━━━━━━━━━━━━\n'
-    '⚡ *Commands*\n'
-    '`/pick [SPORT]` — Get a live +EV pick\n'
-    '`/sports`       — List available sports\n'
-    '`/help`         — All commands\n\n'
-    'Supported: `NBA · NFL · MLB · NHL · NCAAB · NCAAF · EPL`\n'
-    'Example:   `/pick NBA`'
+‘PROPNINJABOT - QuantPicks Elite\n\n’
+‘Institutional-grade sports analytics.\n’
+‘Monte Carlo simulation, Kelly sizing, live edge detection.\n\n’
+‘COMMANDS\n’
+‘/pick [SPORT] - Get a live +EV pick\n’
+‘/sports       - List available sports\n’
+‘/help         - All commands\n\n’
+‘Sports: NBA NFL MLB NHL NCAAB NCAAF EPL\n’
+‘Example: /pick NBA’
 )
-await update.message.reply_text(text, parse_mode='Markdown')
-```
+await update.message.reply_text(text)
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 text = (
-‘📖 *QuantPicks Commands*\n\n’
-‘`/pick`       — NBA pick (default)\n’
-‘`/pick NBA`   — NBA pick\n’
-‘`/pick NFL`   — NFL pick\n’
-‘`/pick MLB`   — MLB pick\n’
-‘`/pick NHL`   — NHL pick\n’
-‘`/pick NCAAB` — College basketball\n’
-‘`/pick NCAAF` — College football\n’
-‘`/pick EPL`   — English Premier League\n’
-‘`/sports`     — Show all supported sports\n’
-‘`/start`      — Welcome message\n’
+‘PROPNINJABOT COMMANDS\n\n’
+‘/pick         - NBA pick (default)\n’
+‘/pick NBA     - NBA pick\n’
+‘/pick NFL     - NFL pick\n’
+‘/pick MLB     - MLB pick\n’
+‘/pick NHL     - NHL pick\n’
+‘/pick NCAAB   - College basketball\n’
+‘/pick NCAAF   - College football\n’
+‘/pick EPL     - English Premier League\n’
+‘/sports       - All supported sports\n’
+‘/start        - Welcome message\n’
 )
-await update.message.reply_text(text, parse_mode=‘Markdown’)
+await update.message.reply_text(text)
 
 async def cmd_sports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 text = (
-‘🏟 *Supported Sports*\n\n’
-‘`NBA`   — Basketball\n’
-‘`NFL`   — American Football\n’
-‘`MLB`   — Baseball\n’
-‘`NHL`   — Hockey\n’
-‘`NCAAB` — College Basketball\n’
-‘`NCAAF` — College Football\n’
-‘`EPL`   — English Premier League\n\n’
-‘Usage: `/pick NFL`’
+‘SUPPORTED SPORTS\n\n’
+‘NBA   - Basketball\n’
+‘NFL   - American Football\n’
+‘MLB   - Baseball\n’
+‘NHL   - Hockey\n’
+‘NCAAB - College Basketball\n’
+‘NCAAF - College Football\n’
+‘EPL   - English Premier League\n\n’
+‘Usage: /pick NFL’
 )
-await update.message.reply_text(text, parse_mode=‘Markdown’)
+await update.message.reply_text(text)
 
 async def cmd_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 chat_id  = update.effective_chat.id
@@ -405,14 +386,12 @@ sport = context.args[0].upper() if context.args else 'NBA'
 if sport not in VALID_SPORTS:
     sports_str = ', '.join(VALID_SPORTS)
     await update.message.reply_text(
-        f'❌ Invalid sport `{sport}`.\nChoose from: `{sports_str}`',
-        parse_mode='Markdown',
+        'Invalid sport: ' + sport + '\nChoose from: ' + sports_str
     )
     return
 
 status_msg = await update.message.reply_text(
-    f'🔄 Fetching live `{sport}` odds & running 20,000 simulations...',
-    parse_mode='Markdown',
+    'Fetching live ' + sport + ' odds and running 20,000 simulations...'
 )
 
 games = fetch_live_odds(sport)
@@ -429,10 +408,10 @@ if not games:
     result = run_quant_engine(demo)
     result['team_a'] = 'Home Team (Demo)'
     result['team_b'] = 'Away Team (Demo)'
-    msg  = format_pick(result, sport)
-    msg += '\n\n⚠️ _Demo mode — set `ODDS_API_KEY` env var for live data._'
+    msg = format_pick(result, sport)
+    msg = msg + '\n\nDEMO MODE - Set ODDS_API_KEY env var for live data.'
     await status_msg.delete()
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    await update.message.reply_text(msg)
     return
 
 best_result: Optional[dict] = None
@@ -451,39 +430,32 @@ await status_msg.delete()
 
 if best_result is None or best_result['ev_bet'] == 'No +EV':
     await update.message.reply_text(
-        f'⚠️ No +EV opportunities detected in today\'s `{sport}` slate. Try another sport.',
-        parse_mode='Markdown',
+        'No +EV opportunities found in todays ' + sport + ' slate. Try another sport.'
     )
     return
 
 msg = format_pick(best_result, sport)
-await update.message.reply_text(msg, parse_mode='Markdown')
-
-team_a_val  = best_result['team_a']
-team_b_val  = best_result['team_b']
-ev_bet_val  = best_result['ev_bet']
-wp_val      = best_result['win_prob_pick']
-kelly_val   = best_result['kelly']
+await update.message.reply_text(msg)
 
 log_pick(
     chat_id,
     sport,
-    f'{team_a_val} vs {team_b_val}',
-    ev_bet_val,
-    wp_val,
-    kelly_val,
+    best_result['team_a'] + ' vs ' + best_result['team_b'],
+    best_result['ev_bet'],
+    best_result['win_prob_pick'],
+    best_result['kelly'],
 )
 ```
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ADMIN COMMANDS
+# ADMIN
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 if update.effective_chat.id != ADMIN_CHAT_ID:
-await update.message.reply_text(‘❌ Unauthorized.’)
+await update.message.reply_text(‘Unauthorized.’)
 return
 
 ```
@@ -493,36 +465,33 @@ c.execute('SELECT COUNT(*) FROM users')
 total_users = c.fetchone()[0]
 c.execute('SELECT COUNT(*) FROM picks_log')
 total_picks = c.fetchone()[0]
-c.execute('''
-    SELECT sport, COUNT(*) as cnt
-    FROM picks_log
-    GROUP BY sport
-    ORDER BY cnt DESC
-''')
+c.execute(
+    'SELECT sport, COUNT(*) as cnt FROM picks_log GROUP BY sport ORDER BY cnt DESC'
+)
 sport_rows = c.fetchall()
 conn.close()
 
-sport_str = '\n'.join(f'  {s}: {n}' for s, n in sport_rows) or '  None yet'
+sport_str = '\n'.join('  ' + s + ': ' + str(n) for s, n in sport_rows) or '  None yet'
 text = (
-    '🛠 *Admin Dashboard*\n\n'
-    f'Total Users:   `{total_users}`\n'
-    f'Picks Served:  `{total_picks}`\n\n'
-    f'Picks by Sport:\n{sport_str}'
+    'ADMIN DASHBOARD\n\n'
+    'Total Users  : ' + str(total_users) + '\n'
+    'Picks Served : ' + str(total_picks) + '\n\n'
+    'Picks by Sport:\n' + sport_str
 )
-await update.message.reply_text(text, parse_mode='Markdown')
+await update.message.reply_text(text)
 ```
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-# FLASK HEALTH SERVER  (Render requires HTTP on PORT)
+# FLASK HEALTH  (Render requires HTTP on PORT)
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-flask_app = Flask(‘QuantPicks’)
+flask_app = Flask(‘propninjabot’)
 
 @flask_app.route(’/’)
 def index():
-return {‘service’: ‘QuantPicks Elite’, ‘status’: ‘running’,
+return {‘service’: ‘propninjabot’, ‘status’: ‘running’,
 ‘timestamp’: datetime.utcnow().isoformat()}, 200
 
 @flask_app.route(’/health’)
@@ -540,9 +509,7 @@ flask_app.run(host=‘0.0.0.0’, port=PORT, use_reloader=False)
 
 def main() -> None:
 if not TELEGRAM_TOKEN:
-raise RuntimeError(
-‘TELEGRAM_TOKEN is not set. Add it as an environment variable in Render.’
-)
+raise RuntimeError(‘TELEGRAM_TOKEN env var is not set.’)
 
 ```
 init_db()
@@ -559,7 +526,7 @@ application.add_handler(CommandHandler('sports', cmd_sports))
 application.add_handler(CommandHandler('pick',   cmd_pick))
 application.add_handler(CommandHandler('admin',  cmd_admin))
 
-log.info('QuantPicks Elite (Open Access) — polling started.')
+log.info('propninjabot polling started.')
 application.run_polling(allowed_updates=Update.ALL_TYPES)
 ```
 
