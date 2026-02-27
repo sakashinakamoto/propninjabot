@@ -1,210 +1,557 @@
+#!/usr/bin/env python3
+“””
+QuantPicks Elite — Open Access Build (No Subscription)
+Deploy on Render as a Web Service. Start command: python bot.py
+
+=== REQUIRED ENV VARS (set in Render dashboard) ===
+TELEGRAM_TOKEN  — From @BotFather
+ODDS_API_KEY    — From https://the-odds-api.com (free tier: 500 req/mo)
+ADMIN_CHAT_ID   — Your personal Telegram chat ID (get from @userinfobot)
+PORT            — Auto-set by Render (default 8080)
+DB_PATH         — Optional: /data/quantpicks.db (requires Render disk addon)
+
+=== requirements.txt ===
+python-telegram-bot>=20.7
+numpy
+flask
+requests
+“””
+
 import os
-import math
 import logging
-import requests
+import sqlite3
+import threading
 import numpy as np
 from datetime import datetime
+from dataclasses import dataclass
+from typing import Dict, Tuple, Optional, List
+import requests
+from flask import Flask
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+Application,
+CommandHandler,
+ContextTypes,
+)
 
-from sklearn.linear_model import LogisticRegression
+# ─────────────────────────────────────────────────────────────────────────────
 
-# -------------------------------
-# CONFIGURATION CONSTANTS
-# -------------------------------
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-MIN_PROB = 0.43
-MIN_EDGE_FLOOR = 0.0001  # minimal edge to always include picks
-PRIZEPICKS_API = "https://api.prizepicks.com/projections"
-KALSHI_API = "https://trading-api.kalshi.com/trade-api/v2/markets"
+# LOGGING
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    level=logging.INFO
+level=logging.INFO,
+format=”%(asctime)s [%(levelname)s] %(name)s — %(message)s”,
 )
-logger = logging.getLogger("propninja")
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+log = logging.getLogger(“QuantPicks”)
 
-PRIZEPICKS_URL = "https://api.prizepicks.com/projections"
-KALSHI_URL = "https://trading-api.kalshi.com/trade-api/v2/markets"
+# ─────────────────────────────────────────────────────────────────────────────
 
-MIN_PROB = 0.43
-MIN_EDGE = 0.0001
-MAX_PICKS = 25
-REQUEST_TIMEOUT = 0
-MAX_RETRIES = 0
+# CONFIGURATION
 
-# -------------------------------
-# DATA FETCHING FUNCTIONS
-# -------------------------------
-def fetch_prizepicks():
-    picks = []
-    try:
-        resp = requests.get(PRIZEPICKS_API, params={"per_page":250, "single_stat":True}, timeout=15)
-        if resp.status_code != 200:
-            logger.warning(f"PrizePicks status {resp.status_code}")
-            return []
-        data = resp.json()
-        players = {}
-        for item in data.get("included", []):
-            if item.get("type") == "new_player":
-                attr = item.get("attributes", {})
-                players[item["id"]] = {"name": attr.get("display_name","Unknown"), "team": attr.get("team","")}
-        for proj in data.get("data", []):
-            attrs = proj.get("attributes", {})
-            line = attrs.get("line_score")
-            stat = attrs.get("stat_type","")
-            sport = attrs.get("league","")
-            if not line or not stat: continue
-            try: line = float(line)
-            except: continue
-            pid = proj.get("relationships",{}).get("new_player",{}).get("data",{}).get("id","")
-            pinfo = players.get(pid,{"name": attrs.get("description","Unknown"), "team": ""})
-            picks.append({
-                "player": pinfo["name"],
-                "team": pinfo["team"],
-                "stat": stat,
-                "line": line,
-                "source": "PrizePicks",
-                "sport": sport.upper()
-            })
-    except Exception as e:
-        logger.warning(f"PrizePicks error: {e}")
-    return picks
+# ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_kalshi():
-    picks = []
-    keywords = ["points", "assists", "rebounds", "goals", "shots", "strikeouts", "hits", "yards", "touchdowns"]
-    try:
-        resp = requests.get(KALSHI_API, params={"limit":1000,"status":"open"}, timeout=15)
-        if resp.status_code != 200:
-            logger.warning(f"Kalshi status {resp.status_code}")
-            return []
-        for market in resp.json().get("markets", []):
-            title = market.get("title","")
-            category = market.get("category","").upper()
-            if not any(kw in title.lower() for kw in keywords): continue
-            line = 0
-            for w in title.replace("+"," ").replace(",","").split():
-                try:
-                    val = float(w)
-                    if 0.5 <= val <= 500:
-                        line = val
-                        break
-                except: continue
-            if line <= 0: continue
-            picks.append({
-                "player": title[:40],
-                "team": "",
-                "stat": title[:30],
-                "line": line,
-                "source": "Kalshi",
-                "sport": category if category else "KALSHI",
-                "liquidity": market.get("volume",0) + market.get("open_interest",0)
-            })
-    except Exception as e:
-        logger.warning(f"Kalshi error: {e}")
-    return picks
+TELEGRAM_TOKEN = os.environ.get(“TELEGRAM_TOKEN”, “”)
+ODDS_API_KEY   = os.environ.get(“ODDS_API_KEY”, “”)
+ADMIN_CHAT_ID  = int(os.environ.get(“ADMIN_CHAT_ID”, “0”))
+PORT           = int(os.environ.get(“PORT”, “8080”))
+DB_PATH        = os.environ.get(“DB_PATH”, “quantpicks.db”)
 
-# -------------------------------
-# NORMALIZATION & FEATURE ENGINEERING
-# -------------------------------
-def normalize_markets(raw_markets):
-    norm = []
-    for m in raw_markets:
-        implied = None
-        if m["source"] == "PrizePicks":
-            implied = 1 / 1.9
-        else:
-            implied = float(m.get("price", 0.5))
-        norm.append({
-            "player": m["player"],
-            "team": m.get("team",""),
-            "stat": m["stat"],
-            "line": m["line"],
-            "source": m["source"],
-            "sport": m["sport"],
-            "liquidity": m.get("liquidity",1),
-            "implied_prob": implied
-        })
-    return norm
+VALID_SPORTS = [“NBA”, “NFL”, “MLB”, “NHL”, “NCAAB”, “NCAAF”, “EPL”]
 
-def build_features(markets):
-    X = []
-    for m in markets:
-        X.append([m["line"], m.get("liquidity",1), len(m["stat"])])
-    return np.array(X)
+# ─────────────────────────────────────────────────────────────────────────────
 
-# -------------------------------
-# MODEL EXECUTION
-# -------------------------------
-def run_edge_model(markets):
-    if not markets: return []
-    X = build_features(markets)
-    model = LogisticRegression()
-    y = np.array([0 if x[0]<5 else 1 for x in X])
-    model.fit(X,y)
-    probs = model.predict_proba(X)[:,1]
-    signals = []
-    for m, p in zip(markets, probs):
-        edge = p - m["implied_prob"]
-        tier = ""
-        if edge > 0.06: tier = "A"
-        elif edge > 0.04: tier = "B"
-        elif edge >= MIN_EDGE_FLOOR: tier = "C"
-        else: tier = "C"  # always include low edge
-        signals.append({
-            "player": m["player"],
-            "market": m["stat"],
-            "source": m["source"],
-            "market_prob": round(m["implied_prob"],3),
-            "model_prob": round(p,3),
-            "edge": round(edge*100,1),
-            "tier": tier,
-            "confidence": round(p*100,1)
-        })
-    signals.sort(key=lambda x: x["edge"], reverse=True)
-    return signals[:40]
+# DATABASE
 
-def format_signals(signals):
-    if not signals:
-        return "No qualified edges found. Market likely efficient right now."
-    msg = "🔥 PROP NINJA SIGNALS 🔥\n\n"
-    for s in signals:
-        msg += f"{s['player']} | {s['market']} | {s['source']} | "
-        msg += f"Market Prob: {s['market_prob']} | Model Prob: {s['model_prob']} | "
-        msg += f"Edge: +{s['edge']}% | Tier: {s['tier']} | Conf: {s['confidence']}%\n\n"
-    return msg
+# ─────────────────────────────────────────────────────────────────────────────
 
-# -------------------------------
-# TELEGRAM HANDLER
-# -------------------------------
-async def runmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Running Prop Ninja edge model...")
-    raw_markets = fetch_prizepicks() + fetch_kalshi()
-    logger.info(f"Fetched {len(raw_markets)} raw markets")
-    norm_markets = normalize_markets(raw_markets)
-    signals = run_edge_model(norm_markets)
-    msg = format_signals(signals)
-    await update.message.reply_text(msg)
+def _db_connect() -> sqlite3.Connection:
+db_dir = os.path.dirname(DB_PATH)
+if db_dir:
+os.makedirs(db_dir, exist_ok=True)
+return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def init_db() -> None:
+conn = _db_connect()
+c = conn.cursor()
+c.execute(”””
+CREATE TABLE IF NOT EXISTS users (
+chat_id  INTEGER PRIMARY KEY,
+username TEXT,
+joined   TEXT
+)
+“””)
+c.execute(”””
+CREATE TABLE IF NOT EXISTS picks_log (
+id        INTEGER PRIMARY KEY AUTOINCREMENT,
+chat_id   INTEGER,
+sport     TEXT,
+matchup   TEXT,
+ev_bet    TEXT,
+win_prob  REAL,
+kelly     REAL,
+timestamp TEXT
+)
+“””)
+conn.commit()
+conn.close()
+log.info(“Database ready at %s”, DB_PATH)
+
+def upsert_user(chat_id: int, username: str) -> None:
+conn = _db_connect()
+c = conn.cursor()
+c.execute(”””
+INSERT OR IGNORE INTO users (chat_id, username, joined)
+VALUES (?, ?, ?)
+“””, (chat_id, username, datetime.utcnow().isoformat()))
+conn.commit()
+conn.close()
+
+def log_pick(
+chat_id: int,
+sport: str,
+matchup: str,
+ev_bet: str,
+win_prob: float,
+kelly: float,
+) -> None:
+conn = _db_connect()
+c = conn.cursor()
+c.execute(”””
+INSERT INTO picks_log (chat_id, sport, matchup, ev_bet, win_prob, kelly, timestamp)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+“””, (chat_id, sport, matchup, ev_bet, win_prob, kelly,
+datetime.utcnow().isoformat()))
+conn.commit()
+conn.close()
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+# QUANT ENGINE
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+SPORT_STD:  Dict[str, float] = {“NBA”: 12.0, “NFL”: 10.0, “MLB”: 3.5, “NHL”: 2.5}
+SPORT_BASE: Dict[str, float] = {“NBA”: 115.0, “NFL”: 23.0, “MLB”: 4.5, “NHL”: 3.0}
+
+@dataclass
+class MatchupInput:
+team_a:        str
+team_b:        str
+sport:         str
+baseline_diff: float
+market_odds_a: float
+market_odds_b: float
+
+def american_to_decimal(odds: float) -> float:
+if odds > 0:
+return 1.0 + (odds / 100.0)
+return 1.0 + (100.0 / abs(odds))
+
+def remove_vig(p_a: float, p_b: float) -> Tuple[float, float]:
+total = p_a + p_b
+return p_a / total, p_b / total
+
+def fractional_kelly(win_prob: float, dec_odds: float, fraction: float = 0.25) -> float:
+b = dec_odds - 1.0
+if b <= 0:
+return 0.0
+q = 1.0 - win_prob
+kelly = (b * win_prob - q) / b
+return max(kelly * fraction, 0.0)
+
+def run_quant_engine(m: MatchupInput, simulations: int = 20000) -> dict:
+std  = SPORT_STD.get(m.sport, 10.0)
+base = SPORT_BASE.get(m.sport, 100.0)
+
+```
+mean_a = base + m.baseline_diff / 2.0
+mean_b = base - m.baseline_diff / 2.0
+
+cov = [
+    [std ** 2,        0.15 * std ** 2],
+    [0.15 * std ** 2, std ** 2],
+]
+scores = np.random.multivariate_normal([mean_a, mean_b], cov, simulations)
+sa, sb = scores[:, 0], scores[:, 1]
+
+win_prob_a = float(np.mean(sa > sb))
+win_prob_b = 1.0 - win_prob_a
+spread     = float(np.mean(sa - sb))
+spread_std = float(np.std(sa - sb))
+
+dec_a = american_to_decimal(m.market_odds_a)
+dec_b = american_to_decimal(m.market_odds_b)
+
+ev_a = win_prob_a * (dec_a - 1.0) - (1.0 - win_prob_a)
+ev_b = win_prob_b * (dec_b - 1.0) - (1.0 - win_prob_b)
+
+if ev_a > 0 and ev_a >= ev_b:
+    ev_bet        = m.team_a
+    kelly         = fractional_kelly(win_prob_a, dec_a)
+    edge          = ev_a
+    win_prob_pick = win_prob_a
+elif ev_b > 0:
+    ev_bet        = m.team_b
+    kelly         = fractional_kelly(win_prob_b, dec_b)
+    edge          = ev_b
+    win_prob_pick = win_prob_b
+else:
+    ev_bet        = "No +EV"
+    kelly         = 0.0
+    edge          = 0.0
+    win_prob_pick = max(win_prob_a, win_prob_b)
+
+return {
+    "team_a":        m.team_a,
+    "team_b":        m.team_b,
+    "win_prob_a":    win_prob_a,
+    "win_prob_b":    win_prob_b,
+    "spread":        spread,
+    "spread_std":    spread_std,
+    "ev_bet":        ev_bet,
+    "kelly":         kelly,
+    "edge":          edge,
+    "win_prob_pick": win_prob_pick,
+    "ci_a":          [float(np.percentile(sa, 5)), float(np.percentile(sa, 95))],
+    "ci_b":          [float(np.percentile(sb, 5)), float(np.percentile(sb, 95))],
+}
+```
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ODDS API
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+SPORT_KEYS: Dict[str, str] = {
+“NBA”:   “basketball_nba”,
+“NFL”:   “americanfootball_nfl”,
+“MLB”:   “baseball_mlb”,
+“NHL”:   “icehockey_nhl”,
+“NCAAB”: “basketball_ncaab”,
+“NCAAF”: “americanfootball_ncaaf”,
+“EPL”:   “soccer_epl”,
+}
+
+def fetch_live_odds(sport: str) -> List[dict]:
+sport_key = SPORT_KEYS.get(sport)
+if not sport_key or not ODDS_API_KEY:
+return []
+url = f”https://api.the-odds-api.com/v4/sports/{sport_key}/odds/”
+params = {
+“apiKey”:     ODDS_API_KEY,
+“regions”:    “us”,
+“markets”:    “h2h”,
+“oddsFormat”: “american”,
+“dateFormat”: “iso”,
+}
+try:
+resp = requests.get(url, params=params, timeout=10)
+if resp.status_code == 200:
+return resp.json()
+log.warning(“Odds API returned %s”, resp.status_code)
+return []
+except Exception as exc:
+log.error(“Odds API error: %s”, exc)
+return []
+
+def parse_matchup(game: dict, sport: str) -> Optional[MatchupInput]:
+try:
+home       = game[“home_team”]
+away       = game[“away_team”]
+bookmakers = game.get(“bookmakers”, [])
+if not bookmakers:
+return None
+outcomes  = bookmakers[0][“markets”][0][“outcomes”]
+odds_map  = {o[“name”]: float(o[“price”]) for o in outcomes}
+odds_a    = odds_map.get(home, -110.0)
+odds_b    = odds_map.get(away, -110.0)
+dec_a     = american_to_decimal(odds_a)
+dec_b     = american_to_decimal(odds_b)
+implied_a = 1.0 / dec_a
+implied_b = 1.0 / dec_b
+true_a, _ = remove_vig(implied_a, implied_b)
+baseline_diff = (true_a - 0.5) * SPORT_STD.get(sport, 10.0) * 1.2
+return MatchupInput(
+team_a=home,
+team_b=away,
+sport=sport,
+baseline_diff=baseline_diff,
+market_odds_a=odds_a,
+market_odds_b=odds_b,
+)
+except Exception as exc:
+log.error(“parse_matchup error: %s”, exc)
+return None
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+# MESSAGE FORMATTER
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+def format_pick(result: dict, sport: str) -> str:
+a      = result[“team_a”]
+b      = result[“team_b”]
+wp_a   = result[“win_prob_a”] * 100.0
+wp_b   = result[“win_prob_b”] * 100.0
+spread = result[“spread”]
+edge   = result[“edge”] * 100.0
+kelly  = result[“kelly”] * 100.0
+stars  = “⭐” * min(5, max(1, int(edge / 3.0)))
+ci_a   = result[“ci_a”]
+ci_b   = result[“ci_b”]
+
+```
+lines = [
+    "━━━━━━━━━━━━━━━━━━━━━━━━",
+    "🎯 *QUANTPICKS ELITE*",
+    f"📊 `{sport}`  ·  _{datetime.utcnow().strftime('%b %d %Y  %H:%M UTC')}_",
+    "━━━━━━━━━━━━━━━━━━━━━━━━",
+    f"🏠 *{a}*",
+    f"✈️  *{b}*",
+    "",
+    "📈 *Win Probability*",
+    f"  {a}:  `{wp_a:.1f}%`",
+    f"  {b}:  `{wp_b:.1f}%`",
+    "",
+    f"📐 Projected Spread:  `{spread:+.1f}`  (±{result['spread_std']:.1f})",
+    "",
+    f"💡 *+EV Pick:*  `{result['ev_bet']}`",
+    f"🔥 Model Edge:  `{edge:.2f}%`  {stars}",
+    f"💰 Kelly Stake (0.25×):  `{kelly:.2f}%` of bankroll",
+    "",
+    "📊 *90% Score Confidence Intervals*",
+    f"  {a}:  `{ci_a[0]:.1f} – {ci_a[1]:.1f}`",
+    f"  {b}:  `{ci_b[0]:.1f} – {ci_b[1]:.1f}`",
+    "",
+    "Simulations: `20,000`",
+    "━━━━━━━━━━━━━━━━━━━━━━━━",
+    "_Past performance does not guarantee future results._",
+]
+return "\n".join(lines)
+```
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+# TELEGRAM HANDLERS
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+chat_id  = update.effective_chat.id
+username = update.effective_user.username or “unknown”
+upsert_user(chat_id, username)
+
+```
+text = (
+    "🏆 *Welcome to QuantPicks Elite*\n\n"
+    "Institutional-grade sports analytics — Monte Carlo simulation, "
+    "Kelly Criterion stake sizing, and live market edge detection.\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "⚡ *Commands*\n"
+    "`/pick [SPORT]` — Get a live +EV pick\n"
+    "`/sports`       — List available sports\n"
+    "`/help`         — All commands\n\n"
+    "Supported: `NBA · NFL · MLB · NHL · NCAAB · NCAAF · EPL`\n"
+    "Example:   `/pick NBA`"
+)
+await update.message.reply_text(text, parse_mode="Markdown")
+```
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+text = (
+“📖 *QuantPicks Commands*\n\n”
+“`/pick`       — NBA pick (default)\n”
+“`/pick NBA`   — NBA pick\n”
+“`/pick NFL`   — NFL pick\n”
+“`/pick MLB`   — MLB pick\n”
+“`/pick NHL`   — NHL pick\n”
+“`/pick NCAAB` — College basketball\n”
+“`/pick NCAAF` — College football\n”
+“`/pick EPL`   — English Premier League\n”
+“`/sports`     — Show all supported sports\n”
+“`/start`      — Welcome message\n”
+)
+await update.message.reply_text(text, parse_mode=“Markdown”)
+
+async def cmd_sports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+text = (
+“🏟 *Supported Sports*\n\n”
+“`NBA`   — Basketball\n”
+“`NFL`   — American Football\n”
+“`MLB`   — Baseball\n”
+“`NHL`   — Hockey\n”
+“`NCAAB` — College Basketball\n”
+“`NCAAF` — College Football\n”
+“`EPL`   — English Premier League\n\n”
+“Usage: `/pick NFL`”
+)
+await update.message.reply_text(text, parse_mode=“Markdown”)
+
+async def cmd_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+chat_id  = update.effective_chat.id
+username = update.effective_user.username or “unknown”
+upsert_user(chat_id, username)
+
+```
+sport = (context.args[0].upper() if context.args else "NBA")
+
+if sport not in VALID_SPORTS:
     await update.message.reply_text(
-        "PropNinja Bot\nLive edge model for PrizePicks & Kalshi.\nUse /runmodel to fetch live signals."
+        f"❌ Invalid sport `{sport}`.\nChoose from: `{', '.join(VALID_SPORTS)}`",
+        parse_mode="Markdown",
     )
+    return
 
-# -------------------------------
-# BOT ENTRY POINT
-# -------------------------------
-def main():
-    if not TELEGRAM_TOKEN:
-        raise ValueError("TELEGRAM_TOKEN missing!")
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("runmodel", runmodel_command))
-    logger.info("PropNinja edge model bot running...")
-    app.run_polling(allowed_updates=None)
+status_msg = await update.message.reply_text(
+    f"🔄 Fetching live `{sport}` odds & running 20,000 simulations...",
+    parse_mode="Markdown",
+)
 
-if __name__ == "__main__":
-    main()
+games = fetch_live_odds(sport)
+
+if not games:
+    demo = MatchupInput(
+        team_a="Home Team",
+        team_b="Away Team",
+        sport=sport,
+        baseline_diff=3.5,
+        market_odds_a=-130,
+        market_odds_b=110,
+    )
+    result = run_quant_engine(demo)
+    result["team_a"] = "Home Team (Demo)"
+    result["team_b"] = "Away Team (Demo)"
+    msg  = format_pick(result, sport)
+    msg += "\n\n⚠️ _Demo mode — set `ODDS_API_KEY` env var for live data._"
+    await status_msg.delete()
+    await update.message.reply_text(msg, parse_mode="Markdown")
+    return
+
+best_result:  Optional[dict]         = None
+best_edge:    float                  = -999.0
+
+for game in games[:15]:
+    m = parse_matchup(game, sport)
+    if m is None:
+        continue
+    r = run_quant_engine(m)
+    if r["edge"] > best_edge:
+        best_edge   = r["edge"]
+        best_result = r
+
+await status_msg.delete()
+
+if best_result is None or best_result["ev_bet"] == "No +EV":
+    await update.message.reply_text(
+        f"⚠️ No +EV opportunities detected in today's `{sport}` slate. Try another sport.",
+        parse_mode="Markdown",
+    )
+    return
+
+msg = format_pick(best_result, sport)
+await update.message.reply_text(msg, parse_mode="Markdown")
+
+log_pick(
+    chat_id,
+    sport,
+    f"{best_result['team_a']} vs {best_result['team_b']}",
+    best_result["ev_bet"],
+    best_result["win_prob_pick"],
+    best_result["kelly"],
+)
+```
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ADMIN COMMANDS
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+if update.effective_chat.id != ADMIN_CHAT_ID:
+await update.message.reply_text(“❌ Unauthorized.”)
+return
+
+```
+conn = _db_connect()
+c    = conn.cursor()
+c.execute("SELECT COUNT(*) FROM users")
+total_users = c.fetchone()[0]
+c.execute("SELECT COUNT(*) FROM picks_log")
+total_picks = c.fetchone()[0]
+c.execute("""
+    SELECT sport, COUNT(*) as cnt
+    FROM picks_log
+    GROUP BY sport
+    ORDER BY cnt DESC
+""")
+sport_rows = c.fetchall()
+conn.close()
+
+sport_str = "\n".join(f"  {s}: {n}" for s, n in sport_rows) or "  None yet"
+text = (
+    "🛠 *Admin Dashboard*\n\n"
+    f"Total Users:   `{total_users}`\n"
+    f"Picks Served:  `{total_picks}`\n\n"
+    f"Picks by Sport:\n{sport_str}"
+)
+await update.message.reply_text(text, parse_mode="Markdown")
+```
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+# FLASK HEALTH SERVER  (Render requires HTTP on PORT)
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+flask_app = Flask(“QuantPicks”)
+
+@flask_app.route(”/”)
+def index():
+return {“service”: “QuantPicks Elite”, “status”: “running”,
+“timestamp”: datetime.utcnow().isoformat()}, 200
+
+@flask_app.route(”/health”)
+def health():
+return {“status”: “ok”}, 200
+
+def run_flask() -> None:
+flask_app.run(host=“0.0.0.0”, port=PORT, use_reloader=False)
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+# MAIN
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+if not TELEGRAM_TOKEN:
+raise RuntimeError(
+“TELEGRAM_TOKEN is not set. Add it as an environment variable in Render.”
+)
+
+```
+init_db()
+
+flask_thread = threading.Thread(target=run_flask, daemon=True, name="flask")
+flask_thread.start()
+log.info("Flask health server started on port %s", PORT)
+
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+application.add_handler(CommandHandler("start",  cmd_start))
+application.add_handler(CommandHandler("help",   cmd_help))
+application.add_handler(CommandHandler("sports", cmd_sports))
+application.add_handler(CommandHandler("pick",   cmd_pick))
+application.add_handler(CommandHandler("admin",  cmd_admin))
+
+log.info("QuantPicks Elite (Open Access) — polling started.")
+application.run_polling(allowed_updates=Update.ALL_TYPES)
+```
+
+if **name** == “**main**”:
+main()
