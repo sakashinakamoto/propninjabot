@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '')
 
 DECIMAL_ODDS = 1.90
-MIN_PROB = 0.60
-MIN_EDGE = 0.05
+MIN_PROB = 0.52
+MIN_EDGE = 0.03
 BASE_VOL = 0.18
 
 
