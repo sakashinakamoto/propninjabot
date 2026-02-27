@@ -1,349 +1,300 @@
 import os
-import math
 import logging
 import requests
+import math
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from typing import List, Dict, Any
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
+import numpy as np
+from sklearn.linear_model import LogisticRegression
 
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '')
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+)
 
-DECIMAL_ODDS = 1.90
-MIN_PROB = 0.52
+# =========================
+# CONFIGURATION CONSTANTS
+# =========================
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+
+DECIMAL_ODDS_PRIZEPICKS = 1.90
+MIN_PROB = 0.57
 MIN_EDGE = 0.03
-BASE_VOL = 0.18
+LIQUIDITY_THRESHOLD = 0  # set >0 if you want liquidity filtering
 
+# =========================
+# LOGGING SETUP
+# =========================
 
-def stat_boost(stat):
-    s = stat.lower()
-    boost = 0.055
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("propninja")
 
-    if 'assist' in s:
-        boost += 0.012
-    elif 'point' in s:
-        boost += 0.010
-    elif 'rebound' in s:
-        boost -= 0.004
-    elif 'goal' in s:
-        boost += 0.009
-    elif 'shot' in s:
-        boost += 0.007
-    elif 'strikeout' in s:
-        boost += 0.011
-    elif 'hit' in s:
-        boost += 0.006
-    elif 'yard' in s:
-        boost += 0.008
-    elif 'touchdown' in s:
-        boost += 0.013
+# =========================
+# DATA FETCHING FUNCTIONS
+# =========================
 
-    return boost
-
-
-def dynamic_volatility(line, stat):
-    vol = BASE_VOL
-
-    if line <= 1.5:
-        vol *= 0.85
-    elif line >= 25:
-        vol *= 1.15
-
-    if 'strikeout' in stat.lower():
-        vol *= 1.10
-    if 'rebound' in stat.lower():
-        vol *= 0.95
-
-    return vol
-
-
-def compute_edge(line, stat):
-    if line <= 0:
-        return 0, 0, 0
-
-    boost = stat_boost(stat)
-    projection = line * (1 + boost)
-    vol = dynamic_volatility(line, stat)
-    std_dev = line * vol
-
-    if std_dev == 0:
-        return 0, 0, 0
-
-    z = (projection - line) / std_dev
-    prob = 0.5 * (1 + math.erf(z / math.sqrt(2)))
-
-    implied = 1 / DECIMAL_ODDS
-    raw_edge = prob - implied
-    sharpness = 1 + (abs(raw_edge) * 0.5)
-    edge = raw_edge * sharpness
-
-    return round(projection, 2), round(prob, 4), round(edge, 4)
-
-
-def grade(edge):
-    if edge >= 0.14:
-        return 'A+'
-    if edge >= 0.12:
-        return 'A'
-    if edge >= 0.09:
-        return 'B'
-    return 'C'
-
-
-def fetch_prizepicks():
-    picks = []
-
+def fetch_prizepicks() -> List[Dict[str, Any]]:
     try:
         resp = requests.get(
-            'https://api.prizepicks.com/projections',
-            params={'per_page': 250, 'single_stat': True},
-            headers={'Content-Type': 'application/json'},
-            timeout=15
+            "https://api.prizepicks.com/projections",
+            params={"per_page": 250, "single_stat": True},
+            headers={"Content-Type": "application/json"},
+            timeout=15,
         )
-
         if resp.status_code != 200:
-            logger.warning('PrizePicks status: ' + str(resp.status_code))
+            logger.warning(f"PrizePicks API status: {resp.status_code}")
             return []
 
         data = resp.json()
         players = {}
 
-        for item in data.get('included', []):
-            if item.get('type') == 'new_player':
-                attrs = item.get('attributes', {})
-                players[item.get('id')] = {
-                    'name': attrs.get('display_name', 'Unknown'),
-                    'team': attrs.get('team', '')
+        for item in data.get("included", []):
+            if item.get("type") == "new_player":
+                attrs = item.get("attributes", {})
+                players[item["id"]] = {
+                    "name": attrs.get("display_name", "Unknown"),
+                    "team": attrs.get("team", ""),
                 }
 
-        for proj in data.get('data', []):
-            attrs = proj.get('attributes', {})
-            line = attrs.get('line_score')
-            stat = attrs.get('stat_type', '')
-            sport = attrs.get('league', '')
+        markets = []
+        for proj in data.get("data", []):
+            attrs = proj.get("attributes", {})
+            line = attrs.get("line_score")
+            stat = attrs.get("stat_type")
+            league = attrs.get("league")
 
-            if line is None or not stat:
+            if not line or not stat:
                 continue
 
             try:
                 line = float(line)
-            except:
+            except Exception:
                 continue
 
-            pid = proj.get('relationships', {}).get('new_player', {}).get('data', {}).get('id')
-            pinfo = players.get(pid, {'name': attrs.get('description', 'Unknown'), 'team': ''})
+            pid = (
+                proj.get("relationships", {})
+                .get("new_player", {})
+                .get("data", {})
+                .get("id")
+            )
 
-            projection, prob, edg = compute_edge(line, stat)
+            player_info = players.get(pid, {"name": "Unknown", "team": ""})
 
-            if prob >= MIN_PROB and edg >= MIN_EDGE:
-                picks.append({
-                    'player': pinfo['name'],
-                    'team': pinfo['team'],
-                    'stat': stat,
-                    'line': line,
-                    'proj': projection,
-                    'prob': prob,
-                    'edge': edg,
-                    'grade': grade(edg),
-                    'pick': 'OVER',
-                    'source': 'PrizePicks',
-                    'sport': str(sport).upper()
-                })
+            markets.append(
+                {
+                    "player": player_info["name"],
+                    "team": player_info["team"],
+                    "market": stat,
+                    "line": line,
+                    "source": "PrizePicks",
+                    "league": league,
+                    "price": None,  # fixed payout model
+                    "liquidity": None,
+                }
+            )
 
-        logger.info('PrizePicks qualified: ' + str(len(picks)))
+        logger.info(f"Fetched {len(markets)} PrizePicks markets")
+        return markets
 
     except Exception as e:
-        logger.warning('PrizePicks error: ' + str(e))
+        logger.exception(f"PrizePicks fetch error: {e}")
+        return []
 
-    return picks
 
-
-def fetch_kalshi():
-    picks = []
-    tickers = ['NBA', 'NFL', 'MLB', 'NHL', 'SOCCER', 'UFC', 'GOLF', 'TEN']
-
+def fetch_kalshi() -> List[Dict[str, Any]]:
     try:
-        for ticker in tickers:
-            try:
-                resp = requests.get(
-                    'https://trading-api.kalshi.com/trade-api/v2/markets',
-                    params={'limit': 200, 'status': 'open', 'series_ticker': ticker},
-                    headers={'Content-Type': 'application/json'},
-                    timeout=10
-                )
+        resp = requests.get(
+            "https://trading-api.kalshi.com/trade-api/v2/markets",
+            params={"limit": 1000, "status": "open"},
+            headers={"Content-Type": "application/json"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.warning(f"Kalshi API status: {resp.status_code}")
+            return []
 
-                if resp.status_code != 200:
-                    continue
+        markets = []
+        for m in resp.json().get("markets", []):
+            title = m.get("title", "")
+            subtitle = m.get("subtitle", "")
+            category = m.get("category", "")
+            price = m.get("yes_ask") or m.get("yes_bid")
+            volume = m.get("volume", 0)
+            open_interest = m.get("open_interest", 0)
 
-                for market in resp.json().get('markets', []):
-                    title = market.get('title', '')
-                    subtitle = market.get('subtitle', '')
-                    yes_price = market.get('yes_price')
-                    no_price = market.get('no_price')
-
-                    if yes_price is None or no_price is None:
-                        continue
-
-                    try:
-                        market_prob_yes = float(yes_price) / 100.0
-                        market_prob_no = float(no_price) / 100.0
-                    except:
-                        continue
-
-                    line = 0.0
-                    for word in title.replace(',', '').split():
-                        try:
-                            val = float(word.replace('+', ''))
-                            if val > 0:
-                                line = val
-                                break
-                        except:
-                            continue
-
-                    if line <= 0:
-                        continue
-
-                    stat = subtitle if subtitle else title[:30]
-                    projection, model_prob, _ = compute_edge(line, stat)
-
-                    edge_yes = model_prob - market_prob_yes
-                    edge_no = (1 - model_prob) - market_prob_no
-
-                    if edge_yes >= MIN_EDGE and model_prob >= 0.55:
-                        picks.append({
-                            'player': title[:40],
-                            'team': '',
-                            'stat': stat[:30],
-                            'line': line,
-                            'proj': projection,
-                            'prob': round(model_prob, 4),
-                            'edge': round(edge_yes, 4),
-                            'grade': grade(edge_yes),
-                            'pick': 'YES',
-                            'source': 'Kalshi',
-                            'sport': ticker
-                        })
-
-                    elif edge_no >= MIN_EDGE and (1 - model_prob) >= 0.55:
-                        picks.append({
-                            'player': title[:40],
-                            'team': '',
-                            'stat': stat[:30],
-                            'line': line,
-                            'proj': projection,
-                            'prob': round(1 - model_prob, 4),
-                            'edge': round(edge_no, 4),
-                            'grade': grade(edge_no),
-                            'pick': 'NO',
-                            'source': 'Kalshi',
-                            'sport': ticker
-                        })
-
-            except:
+            if not price:
                 continue
 
-        logger.info('Kalshi qualified: ' + str(len(picks)))
+            markets.append(
+                {
+                    "player": title[:50],
+                    "team": "",
+                    "market": subtitle or title[:30],
+                    "line": None,
+                    "source": "Kalshi",
+                    "league": category,
+                    "price": float(price) / 100 if float(price) > 1 else float(price),
+                    "liquidity": volume + open_interest,
+                }
+            )
+
+        logger.info(f"Fetched {len(markets)} Kalshi markets")
+        return markets
 
     except Exception as e:
-        logger.warning('Kalshi error: ' + str(e))
+        logger.exception(f"Kalshi fetch error: {e}")
+        return []
 
-    return picks
+# =========================
+# NORMALIZATION
+# =========================
 
+def normalize_markets(raw_markets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized = []
 
-def get_all_picks():
-    all_picks = fetch_prizepicks() + fetch_kalshi()
-    all_picks.sort(key=lambda x: x['edge'], reverse=True)
+    for m in raw_markets:
+        if m["source"] == "Kalshi":
+            implied_prob = float(m["price"])
+        else:
+            implied_prob = 1 / DECIMAL_ODDS_PRIZEPICKS
 
-    seen = set()
-    unique = []
+        normalized.append(
+            {
+                "player": m["player"],
+                "team": m["team"],
+                "market": m["market"],
+                "source": m["source"],
+                "league": m["league"],
+                "implied_probability": implied_prob,
+                "liquidity": m["liquidity"] or 0,
+            }
+        )
 
-    for p in all_picks:
-        key = p['player'] + p['stat'] + str(p['line'])
-        if key not in seen:
-            seen.add(key)
-            unique.append(p)
+    return normalized
 
-    return unique[:25]
+# =========================
+# FEATURE ENGINEERING
+# =========================
 
-
-def get_by_sport(sport):
-    return [p for p in get_all_picks() if p['sport'].upper() == sport.upper()]
-
-
-def fmt(picks, label):
-    ts = datetime.now().strftime('%b %d %I:%M %p')
-    msg = 'PROPNINJA - ' + label + '\n'
-    msg += ts + ' | ' + str(len(picks)) + ' picks\n\n'
-
-    for i, p in enumerate(picks[:10], 1):
-        msg += str(i) + '. ' + p['grade'] + ' ' + p['player']
-        if p['team']:
-            msg += ' (' + p['team'] + ')'
-        msg += ' [' + p['source'] + ']\n'
-        msg += '   ' + p['stat'] + ' | Line: ' + str(p['line']) + ' Proj: ' + str(p['proj']) + '\n'
-        msg += '   ' + p['pick'] + ' | Conf: ' + str(round(p['prob'] * 100, 1)) + '% | Edge: +' + str(round(p['edge'] * 100, 1)) + '% | ' + p['sport'] + '\n\n'
-
-    msg += 'For entertainment only. Gamble responsibly.'
-    return msg
-
-
-def menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton('ALL LIVE PICKS', callback_data='all')],
-        [InlineKeyboardButton('NBA', callback_data='sport_NBA'),
-         InlineKeyboardButton('NFL', callback_data='sport_NFL'),
-         InlineKeyboardButton('MLB', callback_data='sport_MLB')],
-        [InlineKeyboardButton('NHL', callback_data='sport_NHL'),
-         InlineKeyboardButton('SOCCER', callback_data='sport_SOCCER'),
-         InlineKeyboardButton('UFC', callback_data='sport_UFC')],
-        [InlineKeyboardButton('PrizePicks Only', callback_data='src_PrizePicks'),
-         InlineKeyboardButton('Kalshi Only', callback_data='src_Kalshi')]
-    ])
-
-
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        'PropNinja Bot\nLive picks from PrizePicks and Kalshi\nTap below:',
-        reply_markup=menu()
+def build_feature_vector(market: Dict[str, Any]) -> np.ndarray:
+    return np.array(
+        [
+            market["implied_probability"],
+            market["liquidity"],
+        ]
     )
 
+# =========================
+# PROBABILITY MODEL
+# =========================
 
-async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    d = q.data
+def run_edge_model(markets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not markets:
+        return []
 
-    if d == 'all':
-        picks = get_all_picks()
-        await q.edit_message_text(fmt(picks, 'ALL SPORTS')[:4096], reply_markup=menu())
+    X = np.array([build_feature_vector(m) for m in markets])
+
+    # Deterministic synthetic training baseline
+    y = np.array([1 if m["implied_probability"] < 0.5 else 0 for m in markets])
+
+    model = LogisticRegression()
+    model.fit(X, y)
+
+    probs = model.predict_proba(X)[:, 1]
+
+    results = []
+    for i, m in enumerate(markets):
+        model_prob = float(probs[i])
+        edge = model_prob - m["implied_probability"]
+
+        results.append(
+            {
+                **m,
+                "model_probability": model_prob,
+                "edge": edge,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+        )
+
+    return results
+
+# =========================
+# SIGNAL FILTERING
+# =========================
+
+def filter_signals(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    signals = []
+
+    for r in results:
+        if r["model_probability"] >= MIN_PROB and r["edge"] >= MIN_EDGE:
+            if r["liquidity"] >= LIQUIDITY_THRESHOLD:
+                if r["edge"] > 0.06:
+                    tier = "Tier A"
+                elif r["edge"] > 0.04:
+                    tier = "Tier B"
+                else:
+                    tier = "Tier C"
+
+                signals.append({**r, "tier": tier})
+
+    return signals
+
+# =========================
+# TELEGRAM HANDLER
+# =========================
+
+async def runmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Running Prop Ninja edge model...")
+
+    raw_markets = fetch_prizepicks() + fetch_kalshi()
+    normalized = normalize_markets(raw_markets)
+    model_results = run_edge_model(normalized)
+    signals = filter_signals(model_results)
+
+    if not signals:
+        await update.message.reply_text(
+            "No qualified edges found. Market likely efficient right now."
+        )
         return
 
-    if d.startswith('sport_'):
-        sport = d.split('_', 1)[1]
-        picks = get_by_sport(sport)
-        await q.edit_message_text(fmt(picks, sport)[:4096], reply_markup=menu())
-        return
+    signals.sort(key=lambda x: x["edge"], reverse=True)
 
-    if d.startswith('src_'):
-        src = d.split('_', 1)[1]
-        picks = [p for p in get_all_picks() if p['source'] == src]
-        await q.edit_message_text(fmt(picks, src)[:4096], reply_markup=menu())
-        return
+    messages = []
+    for s in signals[:25]:
+        msg = (
+            f"🔥 PROP NINJA SIGNAL\n"
+            f"{s['player']} | {s['market']}\n"
+            f"Source: {s['source']}\n"
+            f"Market Probability: {round(s['implied_probability']*100,2)}%\n"
+            f"Model Probability: {round(s['model_probability']*100,2)}%\n"
+            f"Edge: {round(s['edge']*100,2)}%\n"
+            f"{s['tier']} | Confidence: {round(s['model_probability']*100,1)}%\n"
+        )
+        messages.append(msg)
 
+    await update.message.reply_text("\n\n".join(messages)[:4096])
+
+# =========================
+# MAIN
+# =========================
 
 def main():
     if not TELEGRAM_TOKEN:
-        raise ValueError('TELEGRAM_TOKEN missing')
+        raise ValueError("TELEGRAM_TOKEN missing")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(CommandHandler("runmodel", runmodel_command))
 
-    logger.info('PropNinja running')
+    logger.info("PropNinja edge model bot running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
