@@ -80,7 +80,7 @@ def fetch_prizepicks():
                     "name": attrs.get("display_name") or attrs.get("name", "Unknown"),
                     "team": attrs.get("team", ""),
                     "position": attrs.get("position", ""),
-                }for proj in data.get("data", []):
+                }for proj in data.get("data", {}):
             attrs = proj.get("attributes", {})
             line = attrs.get("line_score")
             stat = attrs.get("stat_type", "")
