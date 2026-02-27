@@ -11,17 +11,12 @@ from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# --- CONFIG & LOGGING ---
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+# --- CONFIG ---
+logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-DECIMAL_ODDS = 1.90
-MIN_PROB = 0.60
-MIN_EDGE = 0.05
 
-# --- YOUR MATH ENGINE ---
+# --- MATH ENGINE ---
 def compute_edge(line, stat):
     if line <= 0: return 0, 0, 0
     boost = 0.055
@@ -30,72 +25,97 @@ def compute_edge(line, stat):
     elif "point" in s: boost += 0.008
     elif "rebound" in s: boost -= 0.005
     elif "goal" in s: boost += 0.007
-    elif "shot" in s: boost += 0.006
-    elif "strikeout" in s: boost += 0.009
-    elif "hit" in s: boost += 0.005
-    
     projection = line * (1 + boost)
     std_dev = line * 0.18
     z = (projection - line) / std_dev
     prob = 0.5 * (1 + math.erf(z / math.sqrt(2)))
-    edge = prob - (1 / DECIMAL_ODDS)
+    edge = prob - (1 / 1.90)
     return round(projection, 2), round(prob, 4), round(edge, 4)
 
-def grade_pick(edge):
-    if edge >= 0.12: return "A"
-    if edge >= 0.09: return "B"
-    return "C"
-
-# --- LIVE SCRAPERS ---
-def fetch_all_data():
+# --- SCRAPER (Fixes the Name/Team issue) ---
+def get_all_picks():
     picks = []
-    # Simplified PrizePicks Scraper
     try:
-        headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
-        resp = requests.get("https://api.prizepicks.com/projections", params={"per_page": 100}, headers=headers, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            for proj in data.get("data", []):
-                attr = proj.get("attributes", {})
-                line = float(attr.get("line_score", 0))
-                stat = attr.get("stat_type", "")
-                proj_val, prob, edg = compute_edge(line, stat)
-                if prob >= MIN_PROB:
-                    picks.append({
-                        "grade": grade_pick(edg), "player": attr.get("description"),
-                        "stat": stat, "line": line, "proj": proj_val,
-                        "prob": prob, "edge": edg, "source": "PrizePicks"
-                    })
-    except: pass
+        url = "https://api.prizepicks.com/projections"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, params={"per_page": 250, "single_stat": True}, headers=headers, timeout=15).json()
+        
+        # KEY FIX: Map IDs to Names & Teams
+        player_map = {}
+        for item in resp.get("included", []):
+            if item.get("type") == "new_player":
+                player_map[item["id"]] = {
+                    "name": item["attributes"].get("display_name"),
+                    "team": item["attributes"].get("team")
+                }
+        
+        # Link Projections to the Map
+        for proj in resp.get("data", []):
+            attr = proj["attributes"]
+            pid = proj["relationships"]["new_player"]["data"]["id"]
+            player_info = player_map.get(pid, {"name": "Unknown", "team": "N/A"})
+            
+            line = float(attr.get("line_score", 0))
+            stat = attr.get("stat_type", "")
+            projection, prob, edge = compute_edge(line, stat)
+            
+            if prob >= 0.60:
+                picks.append({
+                    "player": player_info["name"],
+                    "team": player_info["team"],
+                    "stat": stat, "line": line, "proj": projection,
+                    "prob": prob, "edge": edge, "source": "PrizePicks",
+                    "sport": attr.get("league", "OTHER").upper()
+                })
+    except Exception as e: print(f"Scrape Error: {e}")
     return sorted(picks, key=lambda x: x['edge'], reverse=True)
 
-# --- TELEGRAM HANDLERS ---
-def fmt_msg(picks):
+# --- TELEGRAM FORMATTING ---
+def fmt(picks, label):
     ts = datetime.now().strftime("%b %d %I:%M %p")
-    msg = f"🛡️ *PROPNINJA LIVE*\n{ts} | {len(picks)} picks\n\n"
-    for i, p in enumerate(picks[:5], 1):
-        msg += f"{i}. *[{p['grade']}] {p['player']}*\n   {p['stat']} | Line: {p['line']} Proj: {p['proj']}\n   Conf: {round(p['prob']*100,1)}% | Edge: +{round(p['edge']*100,1)}%\n\n"
+    msg = f"🛡️ *PROPNINJA - {label}*\n{ts} | {len(picks)} picks found\n\n"
+    for i, p in enumerate(picks[:25], 1): # Restoration of 25-player limit
+        grade = "A+" if p['edge'] > 0.12 else "A"
+        msg += f"{i}. *[{grade}] {p['player']}* ({p['team']}) [{p['source']}]\n"
+        msg += f"   {p['stat']} | Line: {p['line']} Proj: {p['proj']}\n"
+        msg += f"   *OVER* | Conf: {round(p['prob']*100,1)}% | Edge: +{round(p['edge']*100,1)}% | {p['sport']}\n\n"
     return msg
 
+# --- MENU & BUTTONS ---
+def get_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("ALL LIVE PICKS", callback_data="all")],
+        [InlineKeyboardButton("NBA", callback_data="sport_NBA"), InlineKeyboardButton("NFL", callback_data="sport_NFL")],
+        [InlineKeyboardButton("MLB", callback_data="sport_MLB"), InlineKeyboardButton("NHL", callback_data="sport_NHL")],
+        [InlineKeyboardButton("PrizePicks Only", callback_data="src_PrizePicks"), InlineKeyboardButton("Kalshi Only", callback_data="src_Kalshi")]
+    ])
+
 async def start(update, context):
-    await update.message.reply_text("🥷 *PropNinja Bot Active*", 
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("GET PICKS", callback_data="all")]]), parse_mode="Markdown")
+    await update.message.reply_text("🥷 *PropNinja Dashboard*", reply_markup=get_menu(), parse_mode="Markdown")
 
 async def button(update, context):
     query = update.callback_query
     await query.answer()
-    if query.data == "all":
-        await query.edit_message_text(fmt_msg(fetch_all_data()), parse_mode="Markdown")
+    data = query.data
+    all_picks = get_all_picks()
+    
+    if data == "all":
+        text = fmt(all_picks, "ALL SPORTS")
+    elif data.startswith("sport_"):
+        sport = data.split("_")[1]
+        text = fmt([p for p in all_picks if p['sport'] == sport], sport)
+    elif data.startswith("src_"):
+        src = data.split("_")[1]
+        text = fmt([p for p in all_picks if p['source'] == src], src)
+        
+    await query.edit_message_text(text[:4096], reply_markup=get_menu(), parse_mode="Markdown")
 
-# --- RENDER WEB SERVER ---
+# --- SERVER ---
 @app.route('/')
-def health(): return "Bot is Running", 200
-
-def run_flask():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+def health(): return "Active"
 
 if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     bot = Application.builder().token(TELEGRAM_TOKEN).build()
     bot.add_handler(CommandHandler("start", start))
     bot.add_handler(CallbackQueryHandler(button))
