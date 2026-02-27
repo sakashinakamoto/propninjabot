@@ -143,7 +143,6 @@ def run_edge_model(markets):
         elif edge > 0.04: tier = "B"
         elif edge >= MIN_EDGE_FLOOR: tier = "C"
         else: tier = "C"  # always include low edge
-        # ensure all picks returned, ignore MIN_EDGE filtering
         signals.append({
             "player": m["player"],
             "market": m["stat"],
@@ -154,7 +153,6 @@ def run_edge_model(markets):
             "tier": tier,
             "confidence": round(p*100,1)
         })
-    # sort by edge descending
     signals.sort(key=lambda x: x["edge"], reverse=True)
     return signals[:40]
 
@@ -175,8 +173,6 @@ async def runmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Running Prop Ninja edge model...")
     raw_markets = fetch_prizepicks() + fetch_kalshi()
     logger.info(f"Fetched {len(raw_markets)} raw markets")
-    for m in raw_markets[:5]:
-        logger.info(f"Sample market: {m}")
     norm_markets = normalize_markets(raw_markets)
     signals = run_edge_model(norm_markets)
     msg = format_signals(signals)
