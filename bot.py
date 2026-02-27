@@ -149,129 +149,100 @@ def fetch_prizepicks():
 
 def fetch_kalshi():
     picks = []
-    BASE = "https://api.elections.kalshi.com/trade-api/v2"
-    keywords = ["points", "assists", "rebounds", "goals", "shots", "strikeouts",
-                "hits", "yards", "touchdowns", "bases", "steals", "blocks",
-                "runs", "saves", "aces", "birdies", "corners", "cards"]
-    sport_map = {
-        "NBA": "NBA", "NFL": "NFL", "MLB": "MLB", "NHL": "NHL",
-        "SOCCER": "SOCCER", "UFC": "UFC", "GOLF": "GOLF",
-        "TENNIS": "TENNIS", "NCAAB": "NCAAB", "NCAAF": "NCAAF",
-        "EPL": "EPL", "KXNBA": "NBA", "KXNFL": "NFL",
-        "KXMLB": "MLB", "KXNHL": "NHL"
-    }
+    tickers = ['NBA', 'NFL', 'MLB', 'NHL', 'SOCCER', 'UFC', 'GOLF', 'TEN']
+
     try:
-        for series_ticker, sport_label in sport_map.items():
+        for ticker in tickers:
             try:
                 resp = requests.get(
-                    BASE + "/markets",
-                    params={"limit": 200, "status": "open", "series_ticker": series_ticker},
-                    timeout=12
+                    'https://trading-api.kalshi.com/trade-api/v2/markets',
+                    params={'limit': 200, 'status': 'open', 'series_ticker': ticker},
+                    headers={'Content-Type': 'application/json'},
+                    timeout=10
                 )
+
                 if resp.status_code != 200:
                     continue
-                for market in resp.json().get("markets", []):
-                    title = market.get("title", "")
-                    subtitle = market.get("subtitle", "")
-                    combined = (title + " " + subtitle).lower()
-                    if not any(kw in combined for kw in keywords):
-                        continue
-                    line = 0.0
-                    for w in title.replace("+", " ").replace(",", "").split():
-                        try:
-                            val = float(w)
-                            if 0.5 <= val <= 500:
-                                line = val
-                                break
-                        except ValueError:
-                            continue
-                    if line <= 0:
-                        continue
-                    stat = subtitle if subtitle else title[:40]
-                    for kw in keywords:
-                        if kw in combined:
-                            stat = kw.capitalize()
-                            break
-                    proj_val, prob, edg = propninja_score(line, stat)
-                    if edg >= MIN_EDGE:
-                        k = kelly(prob)
-                        picks.append({
-                            "player":   title[:50],
-                            "team":     "",
-                            "stat":     stat[:35],
-                            "line":     line,
-                            "proj":     proj_val,
-                            "prob":     prob,
-                            "edge":     edg,
-                            "kelly":    k,
-                            "grade":    grade(edg),
-                            "pick":     "OVER",
-                            "source":   "Kalshi",
-                            "sport":    sport_label,
-                        })
-            except Exception as e:
-                logger.warning("Kalshi ticker " + series_ticker + " error: " + str(e))
-                continue
-        try:
-            resp = requests.get(
-                BASE + "/markets",
-                params={"limit": 500, "status": "open", "category": "Sports"},
-                timeout=15
-            )
-            if resp.status_code == 200:
-                for market in resp.json().get("markets", []):
-                    title = market.get("title", "")
-                    subtitle = market.get("subtitle", "")
-                    combined = (title + " " + subtitle).lower()
-                    if not any(kw in combined for kw in keywords):
-                        continue
-                    line = 0.0
-                    for w in title.replace("+", " ").replace(",", "").split():
-                        try:
-                            val = float(w)
-                            if 0.5 <= val <= 500:
-                                line = val
-                                break
-                        except ValueError:
-                            continue
-                    if line <= 0:
-                        continue
-                    stat = subtitle if subtitle else title[:40]
-                    proj_val, prob, edg = propninja_score(line, stat)
-                    if edg >= MIN_EDGE:
-                        k = kelly(prob)
-                        sport = market.get("event_ticker", "SPORTS")[:6].upper()
-                        picks.append({
-                            "player":   title[:50],
-                            "team":     "",
-                            "stat":     stat[:35],
-                            "line":     line,
-                            "proj":     proj_val,
-                            "prob":     prob,
-                            "edge":     edg,
-                            "kelly":    k,
-                            "grade":    grade(edg),
-                            "pick":     "OVER",
-                            "source":   "Kalshi",
-                            "sport":    sport,
-                        })
-        except Exception as e:
-            logger.warning("Kalshi broad fetch error: " + str(e))
-        logger.info("Kalshi: " + str(len(picks)) + " picks loaded")
-    except Exception as e:
-        logger.warning("Kalshi fetch error: " + str(e))
-    return picks
 
-BACKUP = [
-    {"player": "Kevin Durant",     "team": "HOU", "stat": "Points",         "line": 26.5, "proj": 28.5, "prob": 0.841, "edge": 0.314, "kelly": 0.18, "grade": "A+", "pick": "OVER", "source": "PrizePicks", "sport": "NBA"},
-    {"player": "LaMelo Ball",      "team": "CHA", "stat": "Assists",         "line": 7.5,  "proj": 8.1,  "prob": 0.821, "edge": 0.295, "kelly": 0.16, "grade": "A",  "pick": "OVER", "source": "PrizePicks", "sport": "NBA"},
-    {"player": "Nathan MacKinnon", "team": "COL", "stat": "Points",          "line": 0.5,  "proj": 0.6,  "prob": 0.814, "edge": 0.288, "kelly": 0.15, "grade": "A",  "pick": "OVER", "source": "PrizePicks", "sport": "NHL"},
-    {"player": "Bukayo Saka",      "team": "ARS", "stat": "Shots on Target", "line": 1.5,  "proj": 1.7,  "prob": 0.798, "edge": 0.271, "kelly": 0.14, "grade": "A",  "pick": "OVER", "source": "PrizePicks", "sport": "EPL"},
-    {"player": "Shohei Ohtani",    "team": "LAD", "stat": "Total Bases",     "line": 1.5,  "proj": 1.6,  "prob": 0.781, "edge": 0.254, "kelly": 0.13, "grade": "A",  "pick": "OVER", "source": "PrizePicks", "sport": "MLB"},
-    {"player": "Connor McDavid",   "team": "EDM", "stat": "Points",          "line": 0.5,  "proj": 0.6,  "prob": 0.814, "edge": 0.288, "kelly": 0.15, "grade": "A",  "pick": "OVER", "source": "Kalshi",     "sport": "NHL"},
-    {"player": "Trae Young",       "team": "ATL", "stat": "Assists",         "line": 10.5, "proj": 11.3, "prob": 0.761, "edge": 0.235, "kelly": 0.12, "grade": "A",  "pick": "OVER", "source": "Kalshi",     "sport": "NBA"},
-    {"player": "Alperen Sengun",   "team": "HOU", "stat": "Points",          "line": 20.5, "proj": 22.1, "prob": 0.732, "edge": 0.206, "kelly": 0.10, "grade": "B",  "pick": "OVER", "source": "PrizePicks", "sport": "NBA"},
-]
+                markets = resp.json().get('markets', [])
+
+                for market in markets:
+                    title = market.get('title', '')
+                    subtitle = market.get('subtitle', '')
+
+                    yes_price = market.get('yes_price')
+                    no_price = market.get('no_price')
+
+                    if yes_price is None or no_price is None:
+                        continue
+
+                    try:
+                        market_prob_yes = float(yes_price) / 100.0
+                        market_prob_no = float(no_price) / 100.0
+                    except:
+                        continue
+
+                    # Extract numeric line from title
+                    line = 0.0
+                    for word in title.replace(',', '').split():
+                        try:
+                            val = float(word.replace('+', ''))
+                            if val > 0:
+                                line = val
+                                break
+                        except:
+                            continue
+
+                    if line <= 0:
+                        continue
+
+                    stat = subtitle if subtitle else title[:30]
+
+                    projection, model_prob, _ = compute_edge(line, stat)
+
+                    # Evaluate BOTH sides
+                    edge_yes = model_prob - market_prob_yes
+                    edge_no = (1 - model_prob) - market_prob_no
+
+                    if edge_yes >= MIN_EDGE and model_prob >= 0.55:
+                        picks.append({
+                            'player': title[:40],
+                            'team': '',
+                            'stat': stat[:30],
+                            'line': line,
+                            'proj': projection,
+                            'prob': round(model_prob, 4),
+                            'edge': round(edge_yes, 4),
+                            'grade': grade(edge_yes),
+                            'pick': 'YES',
+                            'source': 'Kalshi',
+                            'sport': ticker
+                        })
+
+                    elif edge_no >= MIN_EDGE and (1 - model_prob) >= 0.55:
+                        picks.append({
+                            'player': title[:40],
+                            'team': '',
+                            'stat': stat[:30],
+                            'line': line,
+                            'proj': projection,
+                            'prob': round(1 - model_prob, 4),
+                            'edge': round(edge_no, 4),
+                            'grade': grade(edge_no),
+                            'pick': 'NO',
+                            'source': 'Kalshi',
+                            'sport': ticker
+                        })
+
+            except:
+                continue
+
+        logger.info('Kalshi live qualified picks: ' + str(len(picks)))
+
+    except Exception as e:
+        logger.warning('Kalshi error: ' + str(e))
+
+    return picks
 
 def get_all_picks():
     pp = fetch_prizepicks()
