@@ -1,14 +1,21 @@
-[tool.poetry]
-name = "propninjabot"
-version = "0.1.0"
-description = "A bot for property management"
-author = "Your Name <your.email@example.com>"
-
-[tool.poetry.dependencies]
-python = "^3.8"
-python-telegram-bot = "^20.0"
-requests = "^2.26"
-
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.backends.pep517"
+requires = ['setuptools>=68.0', 'wheel']
+build-backend = 'setuptools.backends.legacy:build'
+
+[project]
+name = 'propninjabot'
+version = '1.0.0'
+description = 'QuantPicks Elite — Institutional sports analytics Telegram bot'
+requires-python = '>=3.11'
+dependencies = [
+    'python-telegram-bot==20.7',
+    'numpy==1.26.4',
+    'flask==3.0.3',
+    'requests==2.31.0',
+]
+
+[project.scripts]
+propninjabot = 'bot:main'
+
+[tool.setuptools]
+py-modules = ['bot']
