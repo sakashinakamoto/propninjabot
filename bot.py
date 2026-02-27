@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import os
 import logging
 import sqlite3
@@ -12,523 +10,507 @@ import requests
 from flask import Flask
 from telegram import Update
 from telegram.ext import (
-Application,
-CommandHandler,
-ContextTypes,
+    Application,
+    CommandHandler,
+    ContextTypes,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-
 # LOGGING
-
 # ─────────────────────────────────────────────────────────────────────────────
-
 logging.basicConfig(
-level=logging.INFO,
-format=’%(asctime)s [%(levelname)s] %(name)s - %(message)s’,
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s - %(message)s',
 )
-log = logging.getLogger(‘propninjabot’)
+log = logging.getLogger('propninjabot')
 
 # ─────────────────────────────────────────────────────────────────────────────
-
 # CONFIGURATION
+# ─────────────────────────────────────────────────────────────────────────────
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '')
+ODDS_API_KEY   = os.environ.get('ODDS_API_KEY', '')
+ADMIN_CHAT_ID  = int(os.environ.get('ADMIN_CHAT_ID', '0'))
+PORT           = int(os.environ.get('PORT', '8080'))
+DB_PATH        = os.environ.get('DB_PATH', 'propninjabot.db')
+
+VALID_SPORTS = ['NBA', 'NFL', 'MLB', 'NHL', 'NCAAB', 'NCAAF', 'EPL']
 
 # ─────────────────────────────────────────────────────────────────────────────
-
-TELEGRAM_TOKEN = os.environ.get(‘TELEGRAM_TOKEN’, ‘’)
-ODDS_API_KEY   = os.environ.get(‘ODDS_API_KEY’, ‘’)
-ADMIN_CHAT_ID  = int(os.environ.get(‘ADMIN_CHAT_ID’, ‘0’))
-PORT           = int(os.environ.get(‘PORT’, ‘8080’))
-DB_PATH        = os.environ.get(‘DB_PATH’, ‘propninjabot.db’)
-
-VALID_SPORTS = [‘NBA’, ‘NFL’, ‘MLB’, ‘NHL’, ‘NCAAB’, ‘NCAAF’, ‘EPL’]
-
-# ─────────────────────────────────────────────────────────────────────────────
-
 # DATABASE
-
 # ─────────────────────────────────────────────────────────────────────────────
-
 def _db_connect() -> sqlite3.Connection:
-db_dir = os.path.dirname(DB_PATH)
-if db_dir:
-os.makedirs(db_dir, exist_ok=True)
-return sqlite3.connect(DB_PATH, check_same_thread=False)
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
+
 
 def init_db() -> None:
-conn = _db_connect()
-c = conn.cursor()
-c.execute(
-‘CREATE TABLE IF NOT EXISTS users (’
-‘chat_id  INTEGER PRIMARY KEY,’
-‘username TEXT,’
-‘joined   TEXT’
-‘)’
-)
-c.execute(
-‘CREATE TABLE IF NOT EXISTS picks_log (’
-‘id        INTEGER PRIMARY KEY AUTOINCREMENT,’
-‘chat_id   INTEGER,’
-‘sport     TEXT,’
-‘matchup   TEXT,’
-‘ev_bet    TEXT,’
-‘win_prob  REAL,’
-‘kelly     REAL,’
-‘timestamp TEXT’
-‘)’
-)
-conn.commit()
-conn.close()
-log.info(‘Database ready at %s’, DB_PATH)
+    conn = _db_connect()
+    c = conn.cursor()
+    c.execute(
+        'CREATE TABLE IF NOT EXISTS users ('
+        'chat_id  INTEGER PRIMARY KEY,'
+        'username TEXT,'
+        'joined   TEXT'
+        ')'
+    )
+    c.execute(
+        'CREATE TABLE IF NOT EXISTS picks_log ('
+        'id        INTEGER PRIMARY KEY AUTOINCREMENT,'
+        'chat_id   INTEGER,'
+        'sport     TEXT,'
+        'matchup   TEXT,'
+        'ev_bet    TEXT,'
+        'win_prob  REAL,'
+        'kelly     REAL,'
+        'timestamp TEXT'
+        ')'
+    )
+    conn.commit()
+    conn.close()
+    log.info('Database ready at %s', DB_PATH)
+
 
 def upsert_user(chat_id: int, username: str) -> None:
-conn = _db_connect()
-c = conn.cursor()
-c.execute(
-‘INSERT OR IGNORE INTO users (chat_id, username, joined) VALUES (?, ?, ?)’,
-(chat_id, username, datetime.utcnow().isoformat())
-)
-conn.commit()
-conn.close()
+    conn = _db_connect()
+    c = conn.cursor()
+    c.execute(
+        'INSERT OR IGNORE INTO users (chat_id, username, joined) VALUES (?, ?, ?)',
+        (chat_id, username, datetime.utcnow().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
 
 def log_pick(
-chat_id: int,
-sport: str,
-matchup: str,
-ev_bet: str,
-win_prob: float,
-kelly: float,
+    chat_id: int,
+    sport: str,
+    matchup: str,
+    ev_bet: str,
+    win_prob: float,
+    kelly: float,
 ) -> None:
-conn = _db_connect()
-c = conn.cursor()
-c.execute(
-’INSERT INTO picks_log (chat_id, sport, matchup, ev_bet, win_prob, kelly, timestamp) ’
-‘VALUES (?, ?, ?, ?, ?, ?, ?)’,
-(chat_id, sport, matchup, ev_bet, win_prob, kelly, datetime.utcnow().isoformat())
-)
-conn.commit()
-conn.close()
+    conn = _db_connect()
+    c = conn.cursor()
+    c.execute(
+        'INSERT INTO picks_log (chat_id, sport, matchup, ev_bet, win_prob, kelly, timestamp) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?)',
+        (chat_id, sport, matchup, ev_bet, win_prob, kelly, datetime.utcnow().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-
 # QUANT ENGINE
-
 # ─────────────────────────────────────────────────────────────────────────────
+SPORT_STD:  Dict[str, float] = {'NBA': 12.0, 'NFL': 10.0, 'MLB': 3.5, 'NHL': 2.5}
+SPORT_BASE: Dict[str, float] = {'NBA': 115.0, 'NFL': 23.0, 'MLB': 4.5, 'NHL': 3.0}
 
-SPORT_STD:  Dict[str, float] = {‘NBA’: 12.0, ‘NFL’: 10.0, ‘MLB’: 3.5, ‘NHL’: 2.5}
-SPORT_BASE: Dict[str, float] = {‘NBA’: 115.0, ‘NFL’: 23.0, ‘MLB’: 4.5, ‘NHL’: 3.0}
 
 @dataclass
 class MatchupInput:
-team_a:        str
-team_b:        str
-sport:         str
-baseline_diff: float
-market_odds_a: float
-market_odds_b: float
+    team_a:        str
+    team_b:        str
+    sport:         str
+    baseline_diff: float
+    market_odds_a: float
+    market_odds_b: float
+
 
 def american_to_decimal(odds: float) -> float:
-if odds > 0:
-return 1.0 + (odds / 100.0)
-return 1.0 + (100.0 / abs(odds))
+    if odds > 0:
+        return 1.0 + (odds / 100.0)
+    return 1.0 + (100.0 / abs(odds))
+
 
 def remove_vig(p_a: float, p_b: float) -> Tuple[float, float]:
-total = p_a + p_b
-return p_a / total, p_b / total
+    total = p_a + p_b
+    return p_a / total, p_b / total
+
 
 def fractional_kelly(win_prob: float, dec_odds: float, fraction: float = 0.25) -> float:
-b = dec_odds - 1.0
-if b <= 0:
-return 0.0
-q = 1.0 - win_prob
-kelly = (b * win_prob - q) / b
-return max(kelly * fraction, 0.0)
+    b = dec_odds - 1.0
+    if b <= 0:
+        return 0.0
+    q = 1.0 - win_prob
+    kelly = (b * win_prob - q) / b
+    return max(kelly * fraction, 0.0)
+
 
 def run_quant_engine(m: MatchupInput, simulations: int = 20000) -> dict:
-std  = SPORT_STD.get(m.sport, 10.0)
-base = SPORT_BASE.get(m.sport, 100.0)
+    std  = SPORT_STD.get(m.sport, 10.0)
+    base = SPORT_BASE.get(m.sport, 100.0)
 
-```
-mean_a = base + m.baseline_diff / 2.0
-mean_b = base - m.baseline_diff / 2.0
+    mean_a = base + m.baseline_diff / 2.0
+    mean_b = base - m.baseline_diff / 2.0
 
-cov = [
-    [std ** 2,        0.15 * std ** 2],
-    [0.15 * std ** 2, std ** 2],
-]
-scores = np.random.multivariate_normal([mean_a, mean_b], cov, simulations)
-sa = scores[:, 0]
-sb = scores[:, 1]
+    cov = [
+        [std ** 2,        0.15 * std ** 2],
+        [0.15 * std ** 2, std ** 2],
+    ]
+    scores = np.random.multivariate_normal([mean_a, mean_b], cov, simulations)
+    sa = scores[:, 0]
+    sb = scores[:, 1]
 
-win_prob_a = float(np.mean(sa > sb))
-win_prob_b = 1.0 - win_prob_a
-spread     = float(np.mean(sa - sb))
-spread_std = float(np.std(sa - sb))
+    win_prob_a = float(np.mean(sa > sb))
+    win_prob_b = 1.0 - win_prob_a
+    spread     = float(np.mean(sa - sb))
+    spread_std = float(np.std(sa - sb))
 
-dec_a = american_to_decimal(m.market_odds_a)
-dec_b = american_to_decimal(m.market_odds_b)
+    dec_a = american_to_decimal(m.market_odds_a)
+    dec_b = american_to_decimal(m.market_odds_b)
 
-ev_a = win_prob_a * (dec_a - 1.0) - (1.0 - win_prob_a)
-ev_b = win_prob_b * (dec_b - 1.0) - (1.0 - win_prob_b)
+    ev_a = win_prob_a * (dec_a - 1.0) - (1.0 - win_prob_a)
+    ev_b = win_prob_b * (dec_b - 1.0) - (1.0 - win_prob_b)
 
-if ev_a > 0 and ev_a >= ev_b:
-    ev_bet        = m.team_a
-    kelly         = fractional_kelly(win_prob_a, dec_a)
-    edge          = ev_a
-    win_prob_pick = win_prob_a
-elif ev_b > 0:
-    ev_bet        = m.team_b
-    kelly         = fractional_kelly(win_prob_b, dec_b)
-    edge          = ev_b
-    win_prob_pick = win_prob_b
-else:
-    ev_bet        = 'No +EV'
-    kelly         = 0.0
-    edge          = 0.0
-    win_prob_pick = max(win_prob_a, win_prob_b)
+    if ev_a > 0 and ev_a >= ev_b:
+        ev_bet        = m.team_a
+        kelly         = fractional_kelly(win_prob_a, dec_a)
+        edge          = ev_a
+        win_prob_pick = win_prob_a
+    elif ev_b > 0:
+        ev_bet        = m.team_b
+        kelly         = fractional_kelly(win_prob_b, dec_b)
+        edge          = ev_b
+        win_prob_pick = win_prob_b
+    else:
+        ev_bet        = 'No +EV'
+        kelly         = 0.0
+        edge          = 0.0
+        win_prob_pick = max(win_prob_a, win_prob_b)
 
-return {
-    'team_a':        m.team_a,
-    'team_b':        m.team_b,
-    'win_prob_a':    win_prob_a,
-    'win_prob_b':    win_prob_b,
-    'spread':        spread,
-    'spread_std':    spread_std,
-    'ev_bet':        ev_bet,
-    'kelly':         kelly,
-    'edge':          edge,
-    'win_prob_pick': win_prob_pick,
-    'ci_a': [float(np.percentile(sa, 5)), float(np.percentile(sa, 95))],
-    'ci_b': [float(np.percentile(sb, 5)), float(np.percentile(sb, 95))],
-}
-```
+    return {
+        'team_a':        m.team_a,
+        'team_b':        m.team_b,
+        'win_prob_a':    win_prob_a,
+        'win_prob_b':    win_prob_b,
+        'spread':        spread,
+        'spread_std':    spread_std,
+        'ev_bet':        ev_bet,
+        'kelly':         kelly,
+        'edge':          edge,
+        'win_prob_pick': win_prob_pick,
+        'ci_a': [float(np.percentile(sa, 5)), float(np.percentile(sa, 95))],
+        'ci_b': [float(np.percentile(sb, 5)), float(np.percentile(sb, 95))],
+    }
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-
 # ODDS API
-
 # ─────────────────────────────────────────────────────────────────────────────
-
 SPORT_KEYS: Dict[str, str] = {
-‘NBA’:   ‘basketball_nba’,
-‘NFL’:   ‘americanfootball_nfl’,
-‘MLB’:   ‘baseball_mlb’,
-‘NHL’:   ‘icehockey_nhl’,
-‘NCAAB’: ‘basketball_ncaab’,
-‘NCAAF’: ‘americanfootball_ncaaf’,
-‘EPL’:   ‘soccer_epl’,
+    'NBA':   'basketball_nba',
+    'NFL':   'americanfootball_nfl',
+    'MLB':   'baseball_mlb',
+    'NHL':   'icehockey_nhl',
+    'NCAAB': 'basketball_ncaab',
+    'NCAAF': 'americanfootball_ncaaf',
+    'EPL':   'soccer_epl',
 }
+
 
 def fetch_live_odds(sport: str) -> List[dict]:
-sport_key = SPORT_KEYS.get(sport)
-if not sport_key or not ODDS_API_KEY:
-return []
-url = ‘https://api.the-odds-api.com/v4/sports/’ + sport_key + ‘/odds/’
-params = {
-‘apiKey’:     ODDS_API_KEY,
-‘regions’:    ‘us’,
-‘markets’:    ‘h2h’,
-‘oddsFormat’: ‘american’,
-‘dateFormat’: ‘iso’,
-}
-try:
-resp = requests.get(url, params=params, timeout=10)
-if resp.status_code == 200:
-return resp.json()
-log.warning(‘Odds API returned %s’, resp.status_code)
-return []
-except Exception as exc:
-log.error(‘Odds API error: %s’, exc)
-return []
+    sport_key = SPORT_KEYS.get(sport)
+    if not sport_key or not ODDS_API_KEY:
+        return []
+    url = 'https://api.the-odds-api.com/v4/sports/' + sport_key + '/odds/'
+    params = {
+        'apiKey':     ODDS_API_KEY,
+        'regions':    'us',
+        'markets':    'h2h',
+        'oddsFormat': 'american',
+        'dateFormat': 'iso',
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        log.warning('Odds API returned %s', resp.status_code)
+        return []
+    except Exception as exc:
+        log.error('Odds API error: %s', exc)
+        return []
+
 
 def parse_matchup(game: dict, sport: str) -> Optional[MatchupInput]:
-try:
-home       = game[‘home_team’]
-away       = game[‘away_team’]
-bookmakers = game.get(‘bookmakers’, [])
-if not bookmakers:
-return None
-outcomes  = bookmakers[0][‘markets’][0][‘outcomes’]
-odds_map  = {o[‘name’]: float(o[‘price’]) for o in outcomes}
-odds_a    = odds_map.get(home, -110.0)
-odds_b    = odds_map.get(away, -110.0)
-dec_a     = american_to_decimal(odds_a)
-dec_b     = american_to_decimal(odds_b)
-implied_a = 1.0 / dec_a
-implied_b = 1.0 / dec_b
-true_a, _ = remove_vig(implied_a, implied_b)
-baseline_diff = (true_a - 0.5) * SPORT_STD.get(sport, 10.0) * 1.2
-return MatchupInput(
-team_a=home,
-team_b=away,
-sport=sport,
-baseline_diff=baseline_diff,
-market_odds_a=odds_a,
-market_odds_b=odds_b,
-)
-except Exception as exc:
-log.error(‘parse_matchup error: %s’, exc)
-return None
+    try:
+        home       = game['home_team']
+        away       = game['away_team']
+        bookmakers = game.get('bookmakers', [])
+        if not bookmakers:
+            return None
+        outcomes  = bookmakers[0]['markets'][0]['outcomes']
+        odds_map  = {o['name']: float(o['price']) for o in outcomes}
+        odds_a    = odds_map.get(home, -110.0)
+        odds_b    = odds_map.get(away, -110.0)
+        dec_a     = american_to_decimal(odds_a)
+        dec_b     = american_to_decimal(odds_b)
+        implied_a = 1.0 / dec_a
+        implied_b = 1.0 / dec_b
+        true_a, _ = remove_vig(implied_a, implied_b)
+        baseline_diff = (true_a - 0.5) * SPORT_STD.get(sport, 10.0) * 1.2
+        return MatchupInput(
+            team_a=home,
+            team_b=away,
+            sport=sport,
+            baseline_diff=baseline_diff,
+            market_odds_a=odds_a,
+            market_odds_b=odds_b,
+        )
+    except Exception as exc:
+        log.error('parse_matchup error: %s', exc)
+        return None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-
 # MESSAGE FORMATTER
-
 # ─────────────────────────────────────────────────────────────────────────────
-
 def format_pick(result: dict, sport: str) -> str:
-a          = result[‘team_a’]
-b          = result[‘team_b’]
-wp_a       = result[‘win_prob_a’] * 100.0
-wp_b       = result[‘win_prob_b’] * 100.0
-spread     = result[‘spread’]
-spread_std = result[‘spread_std’]
-edge       = result[‘edge’] * 100.0
-kelly      = result[‘kelly’] * 100.0
-ev_bet     = result[‘ev_bet’]
-stars      = ‘*’ * min(5, max(1, int(edge / 3.0)))
-ci_a       = result[‘ci_a’]
-ci_b       = result[‘ci_b’]
-timestamp  = datetime.utcnow().strftime(’%b %d %Y  %H:%M UTC’)
+    a          = result['team_a']
+    b          = result['team_b']
+    wp_a       = result['win_prob_a'] * 100.0
+    wp_b       = result['win_prob_b'] * 100.0
+    spread     = result['spread']
+    spread_std = result['spread_std']
+    edge       = result['edge'] * 100.0
+    kelly      = result['kelly'] * 100.0
+    ev_bet     = result['ev_bet']
+    stars      = '*' * min(5, max(1, int(edge / 3.0)))
+    ci_a       = result['ci_a']
+    ci_b       = result['ci_b']
+    timestamp  = datetime.utcnow().strftime('%b %d %Y  %H:%M UTC')
 
-```
-lines = [
-    '----------------------------------------',
-    '  PROPNINJABOT  |  QUANTPICKS ELITE',
-    '----------------------------------------',
-    'Sport : ' + sport + '   ' + timestamp,
-    '',
-    'HOME  : ' + a,
-    'AWAY  : ' + b,
-    '',
-    'WIN PROBABILITY',
-    '  ' + a + ' : ' + f'{wp_a:.1f}' + '%',
-    '  ' + b + ' : ' + f'{wp_b:.1f}' + '%',
-    '',
-    'PROJECTED SPREAD : ' + f'{spread:+.1f}' + '  (+-' + f'{spread_std:.1f}' + ')',
-    '',
-    '+EV PICK   : ' + ev_bet,
-    'MODEL EDGE : ' + f'{edge:.2f}' + '%  ' + stars,
-    'KELLY (0.25x) : ' + f'{kelly:.2f}' + '% of bankroll',
-    '',
-    '90% CONFIDENCE INTERVALS',
-    '  ' + a + ' : ' + f'{ci_a[0]:.1f}' + ' to ' + f'{ci_a[1]:.1f}',
-    '  ' + b + ' : ' + f'{ci_b[0]:.1f}' + ' to ' + f'{ci_b[1]:.1f}',
-    '',
-    'Simulations : 20,000',
-    '----------------------------------------',
-    'Past results do not guarantee future outcomes.',
-]
-return '\n'.join(lines)
-```
+    lines = [
+        '----------------------------------------',
+        '  PROPNINJABOT  |  QUANTPICKS ELITE',
+        '----------------------------------------',
+        'Sport : ' + sport + '   ' + timestamp,
+        '',
+        'HOME  : ' + a,
+        'AWAY  : ' + b,
+        '',
+        'WIN PROBABILITY',
+        '  ' + a + ' : ' + f'{wp_a:.1f}' + '%',
+        '  ' + b + ' : ' + f'{wp_b:.1f}' + '%',
+        '',
+        'PROJECTED SPREAD : ' + f'{spread:+.1f}' + '  (+-' + f'{spread_std:.1f}' + ')',
+        '',
+        '+EV PICK   : ' + ev_bet,
+        'MODEL EDGE : ' + f'{edge:.2f}' + '%  ' + stars,
+        'KELLY (0.25x) : ' + f'{kelly:.2f}' + '% of bankroll',
+        '',
+        '90% CONFIDENCE INTERVALS',
+        '  ' + a + ' : ' + f'{ci_a[0]:.1f}' + ' to ' + f'{ci_a[1]:.1f}',
+        '  ' + b + ' : ' + f'{ci_b[0]:.1f}' + ' to ' + f'{ci_b[1]:.1f}',
+        '',
+        'Simulations : 20,000',
+        '----------------------------------------',
+        'Past results do not guarantee future outcomes.',
+    ]
+    return '\n'.join(lines)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-
 # TELEGRAM HANDLERS
-
 # ─────────────────────────────────────────────────────────────────────────────
-
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-chat_id  = update.effective_chat.id
-username = update.effective_user.username or ‘unknown’
-upsert_user(chat_id, username)
-text = (
-‘PROPNINJABOT - QuantPicks Elite\n\n’
-‘Institutional-grade sports analytics.\n’
-‘Monte Carlo simulation, Kelly sizing, live edge detection.\n\n’
-‘COMMANDS\n’
-‘/pick [SPORT] - Get a live +EV pick\n’
-‘/sports       - List available sports\n’
-‘/help         - All commands\n\n’
-‘Sports: NBA NFL MLB NHL NCAAB NCAAF EPL\n’
-‘Example: /pick NBA’
-)
-await update.message.reply_text(text)
+    chat_id  = update.effective_chat.id
+    username = update.effective_user.username or 'unknown'
+    upsert_user(chat_id, username)
+    text = (
+        'PROPNINJABOT - QuantPicks Elite\n\n'
+        'Institutional-grade sports analytics.\n'
+        'Monte Carlo simulation, Kelly sizing, live edge detection.\n\n'
+        'COMMANDS\n'
+        '/pick [SPORT] - Get a live +EV pick\n'
+        '/sports       - List available sports\n'
+        '/help         - All commands\n\n'
+        'Sports: NBA NFL MLB NHL NCAAB NCAAF EPL\n'
+        'Example: /pick NBA'
+    )
+    await update.message.reply_text(text)
+
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-text = (
-‘PROPNINJABOT COMMANDS\n\n’
-‘/pick         - NBA pick (default)\n’
-‘/pick NBA     - NBA pick\n’
-‘/pick NFL     - NFL pick\n’
-‘/pick MLB     - MLB pick\n’
-‘/pick NHL     - NHL pick\n’
-‘/pick NCAAB   - College basketball\n’
-‘/pick NCAAF   - College football\n’
-‘/pick EPL     - English Premier League\n’
-‘/sports       - All supported sports\n’
-‘/start        - Welcome message\n’
-)
-await update.message.reply_text(text)
+    text = (
+        'PROPNINJABOT COMMANDS\n\n'
+        '/pick         - NBA pick (default)\n'
+        '/pick NBA     - NBA pick\n'
+        '/pick NFL     - NFL pick\n'
+        '/pick MLB     - MLB pick\n'
+        '/pick NHL     - NHL pick\n'
+        '/pick NCAAB   - College basketball\n'
+        '/pick NCAAF   - College football\n'
+        '/pick EPL     - English Premier League\n'
+        '/sports       - All supported sports\n'
+        '/start        - Welcome message\n'
+    )
+    await update.message.reply_text(text)
+
 
 async def cmd_sports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-text = (
-‘SUPPORTED SPORTS\n\n’
-‘NBA   - Basketball\n’
-‘NFL   - American Football\n’
-‘MLB   - Baseball\n’
-‘NHL   - Hockey\n’
-‘NCAAB - College Basketball\n’
-‘NCAAF - College Football\n’
-‘EPL   - English Premier League\n\n’
-‘Usage: /pick NFL’
-)
-await update.message.reply_text(text)
+    text = (
+        'SUPPORTED SPORTS\n\n'
+        'NBA   - Basketball\n'
+        'NFL   - American Football\n'
+        'MLB   - Baseball\n'
+        'NHL   - Hockey\n'
+        'NCAAB - College Basketball\n'
+        'NCAAF - College Football\n'
+        'EPL   - English Premier League\n\n'
+        'Usage: /pick NFL'
+    )
+    await update.message.reply_text(text)
+
 
 async def cmd_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-chat_id  = update.effective_chat.id
-username = update.effective_user.username or ‘unknown’
-upsert_user(chat_id, username)
+    chat_id  = update.effective_chat.id
+    username = update.effective_user.username or 'unknown'
+    upsert_user(chat_id, username)
 
-```
-sport = context.args[0].upper() if context.args else 'NBA'
+    sport = context.args[0].upper() if context.args else 'NBA'
 
-if sport not in VALID_SPORTS:
-    sports_str = ', '.join(VALID_SPORTS)
-    await update.message.reply_text(
-        'Invalid sport: ' + sport + '\nChoose from: ' + sports_str
+    if sport not in VALID_SPORTS:
+        sports_str = ', '.join(VALID_SPORTS)
+        await update.message.reply_text(
+            'Invalid sport: ' + sport + '\nChoose from: ' + sports_str
+        )
+        return
+
+    status_msg = await update.message.reply_text(
+        'Fetching live ' + sport + ' odds and running 20,000 simulations...'
     )
-    return
 
-status_msg = await update.message.reply_text(
-    'Fetching live ' + sport + ' odds and running 20,000 simulations...'
-)
+    games = fetch_live_odds(sport)
 
-games = fetch_live_odds(sport)
+    if not games:
+        demo = MatchupInput(
+            team_a='Home Team',
+            team_b='Away Team',
+            sport=sport,
+            baseline_diff=3.5,
+            market_odds_a=-130,
+            market_odds_b=110,
+        )
+        result = run_quant_engine(demo)
+        result['team_a'] = 'Home Team (Demo)'
+        result['team_b'] = 'Away Team (Demo)'
+        msg = format_pick(result, sport)
+        msg = msg + '\n\nDEMO MODE - Set ODDS_API_KEY env var for live data.'
+        await status_msg.delete()
+        await update.message.reply_text(msg)
+        return
 
-if not games:
-    demo = MatchupInput(
-        team_a='Home Team',
-        team_b='Away Team',
-        sport=sport,
-        baseline_diff=3.5,
-        market_odds_a=-130,
-        market_odds_b=110,
-    )
-    result = run_quant_engine(demo)
-    result['team_a'] = 'Home Team (Demo)'
-    result['team_b'] = 'Away Team (Demo)'
-    msg = format_pick(result, sport)
-    msg = msg + '\n\nDEMO MODE - Set ODDS_API_KEY env var for live data.'
+    best_result: Optional[dict] = None
+    best_edge:   float          = -999.0
+
+    for game in games[:15]:
+        m = parse_matchup(game, sport)
+        if m is None:
+            continue
+        r = run_quant_engine(m)
+        if r['edge'] > best_edge:
+            best_edge   = r['edge']
+            best_result = r
+
     await status_msg.delete()
+
+    if best_result is None or best_result['ev_bet'] == 'No +EV':
+        await update.message.reply_text(
+            'No +EV opportunities found in todays ' + sport + ' slate. Try another sport.'
+        )
+        return
+
+    msg = format_pick(best_result, sport)
     await update.message.reply_text(msg)
-    return
 
-best_result: Optional[dict] = None
-best_edge:   float          = -999.0
-
-for game in games[:15]:
-    m = parse_matchup(game, sport)
-    if m is None:
-        continue
-    r = run_quant_engine(m)
-    if r['edge'] > best_edge:
-        best_edge   = r['edge']
-        best_result = r
-
-await status_msg.delete()
-
-if best_result is None or best_result['ev_bet'] == 'No +EV':
-    await update.message.reply_text(
-        'No +EV opportunities found in todays ' + sport + ' slate. Try another sport.'
+    log_pick(
+        chat_id,
+        sport,
+        best_result['team_a'] + ' vs ' + best_result['team_b'],
+        best_result['ev_bet'],
+        best_result['win_prob_pick'],
+        best_result['kelly'],
     )
-    return
 
-msg = format_pick(best_result, sport)
-await update.message.reply_text(msg)
-
-log_pick(
-    chat_id,
-    sport,
-    best_result['team_a'] + ' vs ' + best_result['team_b'],
-    best_result['ev_bet'],
-    best_result['win_prob_pick'],
-    best_result['kelly'],
-)
-```
 
 # ─────────────────────────────────────────────────────────────────────────────
-
 # ADMIN
-
 # ─────────────────────────────────────────────────────────────────────────────
-
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-if update.effective_chat.id != ADMIN_CHAT_ID:
-await update.message.reply_text(‘Unauthorized.’)
-return
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        await update.message.reply_text('Unauthorized.')
+        return
 
-```
-conn = _db_connect()
-c    = conn.cursor()
-c.execute('SELECT COUNT(*) FROM users')
-total_users = c.fetchone()[0]
-c.execute('SELECT COUNT(*) FROM picks_log')
-total_picks = c.fetchone()[0]
-c.execute(
-    'SELECT sport, COUNT(*) as cnt FROM picks_log GROUP BY sport ORDER BY cnt DESC'
-)
-sport_rows = c.fetchall()
-conn.close()
+    conn = _db_connect()
+    c    = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM users')
+    total_users = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM picks_log')
+    total_picks = c.fetchone()[0]
+    c.execute(
+        'SELECT sport, COUNT(*) as cnt FROM picks_log GROUP BY sport ORDER BY cnt DESC'
+    )
+    sport_rows = c.fetchall()
+    conn.close()
 
-sport_str = '\n'.join('  ' + s + ': ' + str(n) for s, n in sport_rows) or '  None yet'
-text = (
-    'ADMIN DASHBOARD\n\n'
-    'Total Users  : ' + str(total_users) + '\n'
-    'Picks Served : ' + str(total_picks) + '\n\n'
-    'Picks by Sport:\n' + sport_str
-)
-await update.message.reply_text(text)
-```
+    sport_str = '\n'.join('  ' + s + ': ' + str(n) for s, n in sport_rows) or '  None yet'
+    text = (
+        'ADMIN DASHBOARD\n\n'
+        'Total Users  : ' + str(total_users) + '\n'
+        'Picks Served : ' + str(total_picks) + '\n\n'
+        'Picks by Sport:\n' + sport_str
+    )
+    await update.message.reply_text(text)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-
 # FLASK HEALTH  (Render requires HTTP on PORT)
-
 # ─────────────────────────────────────────────────────────────────────────────
+flask_app = Flask('propninjabot')
 
-flask_app = Flask(‘propninjabot’)
 
-@flask_app.route(’/’)
+@flask_app.route('/')
 def index():
-return {‘service’: ‘propninjabot’, ‘status’: ‘running’,
-‘timestamp’: datetime.utcnow().isoformat()}, 200
+    return {'service': 'propninjabot', 'status': 'running',
+            'timestamp': datetime.utcnow().isoformat()}, 200
 
-@flask_app.route(’/health’)
+
+@flask_app.route('/health')
 def health():
-return {‘status’: ‘ok’}, 200
+    return {'status': 'ok'}, 200
+
 
 def run_flask() -> None:
-flask_app.run(host=‘0.0.0.0’, port=PORT, use_reloader=False)
+    flask_app.run(host='0.0.0.0', port=PORT, use_reloader=False)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-
 # MAIN
-
 # ─────────────────────────────────────────────────────────────────────────────
-
 def main() -> None:
-if not TELEGRAM_TOKEN:
-raise RuntimeError(‘TELEGRAM_TOKEN env var is not set.’)
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError('TELEGRAM_TOKEN env var is not set.')
 
-```
-init_db()
+    init_db()
 
-flask_thread = threading.Thread(target=run_flask, daemon=True, name='flask')
-flask_thread.start()
-log.info('Flask health server started on port %s', PORT)
+    flask_thread = threading.Thread(target=run_flask, daemon=True, name='flask')
+    flask_thread.start()
+    log.info('Flask health server started on port %s', PORT)
 
-application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-application.add_handler(CommandHandler('start',  cmd_start))
-application.add_handler(CommandHandler('help',   cmd_help))
-application.add_handler(CommandHandler('sports', cmd_sports))
-application.add_handler(CommandHandler('pick',   cmd_pick))
-application.add_handler(CommandHandler('admin',  cmd_admin))
+    application.add_handler(CommandHandler('start',  cmd_start))
+    application.add_handler(CommandHandler('help',   cmd_help))
+    application.add_handler(CommandHandler('sports', cmd_sports))
+    application.add_handler(CommandHandler('pick',   cmd_pick))
+    application.add_handler(CommandHandler('admin',  cmd_admin))
 
-log.info('propninjabot polling started.')
-application.run_polling(allowed_updates=Update.ALL_TYPES)
-```
+    log.info('propninjabot polling started.')
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if **name** == ‘**main**’:
-main()
+
+if __name__ == '__main__':
+    main()
