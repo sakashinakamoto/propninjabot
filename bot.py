@@ -96,8 +96,57 @@ def fetch_kalshi():
         for ticker in tickers:
             try:
                 resp = requests.get(
-                    "https://trading-api.kalshi.com/trade-api/v2/markets",
-                    params={"limit": 100, "status": "open", "series_ticker": ticker},
+                   def fetch_kalshi():
+    picks = []
+    try:
+        keywords = ["points", "assists", "rebounds", "goals", "shots", "strikeouts", "hits", "yards", "touchdowns"]
+        resp = requests.get(
+            "https://trading-api.kalshi.com/trade-api/v2/markets",
+            params={"limit": 1000, "status": "open"},
+            headers={"Content-Type": "application/json"},
+            timeout=15
+        )
+        if resp.status_code != 200:
+            logger.warning("Kalshi status: " + str(resp.status_code))
+            return []
+        for market in resp.json().get("markets", []):
+            title = market.get("title", "")
+            category = market.get("category", "").upper()
+            if not any(kw in title.lower() for kw in keywords):
+                continue
+            line = 0.0
+            for w in title.replace("+", " ").replace(",", "").split():
+                try:
+                    val = float(w)
+                    if 0.5 <= val <= 500:
+                        line = val
+                        break
+                except ValueError:
+                    continue
+            if line <= 0:
+                continue
+            stat = market.get("subtitle", title[:30])
+            sport = category if category else "KALSHI"
+            projection, prob, edg = compute_edge(line, stat)
+            if prob >= MIN_PROB and edg >= MIN_EDGE:
+                picks.append({
+                    "player": title[:40],
+                    "team": "",
+                    "stat": stat[:30],
+                    "line": line,
+                    "proj": projection,
+                    "prob": prob,
+                    "edge": edg,
+                    "grade": grade(edg),
+                    "pick": "OVER",
+                    "source": "Kalshi",
+                    "sport": sport,
+                })
+        logger.info("Kalshi: " + str(len(picks)) + " picks")
+    except Exception as e:
+        logger.warning("Kalshi error: " + str(e))
+    return picks
+
                     headers={"Content-Type": "application/json"},
                     timeout=10
                 )
