@@ -23,6 +23,17 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger("propninja")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+PRIZEPICKS_URL = "https://api.prizepicks.com/projections"
+KALSHI_URL = "https://trading-api.kalshi.com/trade-api/v2/markets"
+
+MIN_PROB = 0.60
+MIN_EDGE = 0.05
+MAX_PICKS = 25
+REQUEST_TIMEOUT = 15
+MAX_RETRIES = 3
 
 # -------------------------------
 # DATA FETCHING FUNCTIONS
