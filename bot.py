@@ -4,7 +4,28 @@ HEADERS = {
     "Referer": "https://app.prizepicks.com/",
     "Origin": "https://app.prizepicks.com"
 }
+# ==========================================
+# TEAM ABBREVIATIONS (NBA example)
+# ==========================================
 
+TEAM_ABBR = {
+    "Los Angeles Lakers": "LAL",
+    "Los Angeles Clippers": "LAC",
+    "Golden State Warriors": "GSW",
+    "Boston Celtics": "BOS",
+    "Milwaukee Bucks": "MIL",
+    "Phoenix Suns": "PHX",
+    "Denver Nuggets": "DEN",
+    "Miami Heat": "MIA",
+    "Dallas Mavericks": "DAL",
+    "Philadelphia 76ers": "PHI",
+    "New York Knicks": "NYK",
+    "Chicago Bulls": "CHI",
+    "Brooklyn Nets": "BKN",
+    "Cleveland Cavaliers": "CLE",
+    "Atlanta Hawks": "ATL",
+    # Add more as needed
+}
 #!/usr/bin/env python3
 
 import os
